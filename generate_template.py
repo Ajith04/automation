@@ -6,10 +6,6 @@ from datetime import datetime
 import random
 
 # ---------- CONFIG ----------
-EVENTS_FILE = None  # to be passed to function
-STAFF_FILE = None   # to be passed to function
-OUTPUT_FILE = None  # to be passed to function
-
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
 TARGET_GREEN = "FF00B050"  # event availability
 TARGET_RED = "FFC00000"    # ignore instructor if event cell red
@@ -166,9 +162,8 @@ def get_light_fill():
         "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
         "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
     ]
-    return PatternFill(start_color=random.choice(colors),
-                       end_color=random.choice(colors),
-                       fill_type="solid")
+    hexcolor = random.choice(colors)
+    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
@@ -177,6 +172,7 @@ def generate_output(events_file, staff_file, output_file):
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     activity_cache = {}  # raw activity -> instructors
+    event_color_cache = {}  # ensure same event always has same color
 
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
@@ -252,9 +248,6 @@ def generate_output(events_file, staff_file, output_file):
             if not event_names:
                 continue
 
-            # assign random light color for this event
-            fill = get_light_fill()
-
             # get instructors (cache)
             if activity in activity_cache:
                 instrs = activity_cache[activity]
@@ -263,11 +256,14 @@ def generate_output(events_file, staff_file, output_file):
                 activity_cache[activity] = instrs
 
             for event in event_names:
+                # reuse same color for same event
+                if event not in event_color_cache:
+                    event_color_cache[event] = get_light_fill()
+                fill = event_color_cache[event]
+
                 # main event row
-                ws_out.cell(row=out_row, column=1, value=event).fill = fill
-                ws_out.cell(row=out_row, column=2, value=event).fill = fill
-                ws_out.cell(row=out_row, column=3, value=activity).fill = fill
-                ws_out.cell(row=out_row, column=4, value=date_str).fill = fill
+                for col_idx, val in enumerate([event, event, activity, date_str], start=1):
+                    ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                 if "-" in timing:
                     parts = [p.strip() for p in timing.split("-", 1)]
                     ws_out.cell(row=out_row, column=5, value=parts[0]).fill = fill
@@ -275,17 +271,15 @@ def generate_output(events_file, staff_file, output_file):
                         ws_out.cell(row=out_row, column=6, value=parts[1]).fill = fill
                 out_row += 1
 
-                # instructor rows
+                # instructor rows (same shading)
                 for instr in instrs:
-                    ws_out.cell(row=out_row, column=1, value=event)
-                    ws_out.cell(row=out_row, column=2, value=instr)
-                    ws_out.cell(row=out_row, column=3, value=activity)
-                    ws_out.cell(row=out_row, column=4, value=date_str)
+                    for col_idx, val in enumerate([event, instr, activity, date_str], start=1):
+                        ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                     if "-" in timing:
                         parts = [p.strip() for p in timing.split("-", 1)]
-                        ws_out.cell(row=out_row, column=5, value=parts[0])
+                        ws_out.cell(row=out_row, column=5, value=parts[0]).fill = fill
                         if len(parts) > 1:
-                            ws_out.cell(row=out_row, column=6, value=parts[1])
+                            ws_out.cell(row=out_row, column=6, value=parts[1]).fill = fill
                     out_row += 1
 
     wb_out.save(output_file)
