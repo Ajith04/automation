@@ -1,4 +1,3 @@
-# generate_template.py
 import re
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
@@ -7,7 +6,6 @@ import random
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_GREEN = "FF00B050"  # event availability
 TARGET_RED = "FFC00000"    # ignore instructor if event cell red
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
@@ -47,9 +45,6 @@ def get_rgb(cell):
     if hasattr(color, "rgb") and color.rgb:
         return str(color.rgb).upper()
     return None
-
-def is_green(cell):
-    return get_rgb(cell) == TARGET_GREEN
 
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
@@ -223,24 +218,24 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            # find first green date
-            first_green_day = None
+            # find first cell with number > 0
+            first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(row=r, column=col)
-                if is_green(c):
-                    hdr = ws_src.cell(row=1, column=col).value
-                    try:
-                        first_green_day = int(hdr)
-                    except:
-                        first_green_day = None
-                    break
-            if not first_green_day:
+                try:
+                    if c.value is not None and float(c.value) > 0:
+                        hdr = ws_src.cell(row=1, column=col).value
+                        first_day = int(hdr)
+                        break
+                except:
+                    continue
+            if not first_day:
                 continue
 
             month_num = parse_month_to_num(month_val)
             if not month_num:
                 continue
-            date_str = f"{first_green_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
+            date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
             # build event names
             event_names = build_event_names(sheet_name, resort, activity, product,
