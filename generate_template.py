@@ -78,7 +78,6 @@ def clean_instructor_name(name):
         return None
     return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
 
-# ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -136,7 +135,6 @@ def generate_output(events_file, staff_file, output_file):
         add_headers(ws_out)
 
         header_map = {safe_str(ws_src.cell(row=1, column=c).value).lower(): c for c in range(1, ws_src.max_column + 1) if ws_src.cell(row=1, column=c).value}
-
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         duration_col = header_map.get("activity duration")
@@ -148,9 +146,7 @@ def generate_output(events_file, staff_file, output_file):
 
         date_start_col = month_col + 1
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
-
         out_row = 2
-        activity_seen = set()
 
         for r in range(2, ws_src.max_row + 1):
             activity = safe_str(ws_src.cell(row=r, column=activity_col).value)
@@ -158,7 +154,7 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             resort = safe_str(ws_src.cell(row=r, column=resort_col).value) if resort_col else ""
             duration = safe_str(ws_src.cell(row=r, column=duration_col).value) if duration_col else ""
-            timing = safe_str(ws_src.cell(row=r, column=timing_col).value) if timing_col else ""
+            timing_cell = safe_str(ws_src.cell(row=r, column=timing_col).value) if timing_col else ""
             month_val = ws_src.cell(row=r, column=month_col).value
 
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
@@ -169,8 +165,7 @@ def generate_output(events_file, staff_file, output_file):
                 c = ws_src.cell(row=r, column=col)
                 try:
                     if c.value is not None and float(c.value) > 0:
-                        hdr = ws_src.cell(row=1, column=col).value
-                        first_day = int(hdr)
+                        first_day = int(ws_src.cell(row=1, column=col).value)
                         break
                 except:
                     continue
@@ -182,28 +177,44 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            event_name = f"{activity} - {resort}" if (activity, resort) not in activity_seen else activity
-            activity_seen.add((activity, resort))
+            # Make activity name distinct per resort
+            event_name = f"{activity} - {resort}" if resort else activity
 
-            if event_name not in event_color_cache:
-                event_color_cache[event_name] = get_light_fill()
-            fill = event_color_cache[event_name]
-
-            time_slots = [timing] if '|' not in timing else [t.strip() for t in timing.split('|')]
-
-            # populate rows for each time slot
-            for slot in time_slots:
-                start_time, end_time = [p.strip() for p in slot.split('-')] if '-' in slot else (slot, '')
-                for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
-                    ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
-
-                # instructor rows
+            # Instructors
+            if activity in activity_cache:
+                instrs = activity_cache[activity]
+            else:
                 instrs = instructors_map.get(sheet_name, {}).get(activity, [])
-                for instr in instrs:
-                    for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
-                        ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
-                    out_row += 1
+                activity_cache[activity] = instrs
+
+            # Process multiple time slots
+            slots = [s.strip() for s in timing_cell.split('|')] if '|' in timing_cell else [timing_cell]
+            for slot in slots:
+                if not slot:
+                    continue
+                parts = [p.strip() for p in slot.split('-', 1)]
+                start_time = parts[0]
+                end_time = parts[1] if len(parts) > 1 else ""
+
+                # Event row
+                fill = event_color_cache.setdefault(event_name, get_light_fill())
+                ws_out.cell(row=out_row, column=1, value=event_name).fill = fill
+                ws_out.cell(row=out_row, column=2, value=activity).fill = fill  # Resource = raw activity
+                ws_out.cell(row=out_row, column=3, value=activity).fill = fill  # Configuration = raw activity
+                ws_out.cell(row=out_row, column=4, value=date_str).fill = fill
+                ws_out.cell(row=out_row, column=5, value=start_time).fill = fill
+                ws_out.cell(row=out_row, column=6, value=end_time).fill = fill
                 out_row += 1
+
+                # Instructor rows
+                for instr in instrs:
+                    ws_out.cell(row=out_row, column=1, value=event_name).fill = fill
+                    ws_out.cell(row=out_row, column=2, value=instr).fill = fill
+                    ws_out.cell(row=out_row, column=3, value=activity).fill = fill
+                    ws_out.cell(row=out_row, column=4, value=date_str).fill = fill
+                    ws_out.cell(row=out_row, column=5, value=start_time).fill = fill
+                    ws_out.cell(row=out_row, column=6, value=end_time).fill = fill
+                    out_row += 1
 
     wb_out.save(output_file)
     print(f"✅ Output saved to {output_file}")
