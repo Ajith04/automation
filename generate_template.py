@@ -32,6 +32,7 @@ MONTH_MAP = {
 def safe_str(v):
     return "" if v is None else str(v).strip()
 
+
 def get_rgb(cell):
     """Return the RGB string of a cell's fill color, or None."""
     if cell is None:
@@ -46,8 +47,10 @@ def get_rgb(cell):
         return str(color.rgb).upper()
     return None
 
+
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
+
 
 def parse_month_to_num(month_value):
     """Convert month string/number to integer 1-12."""
@@ -69,19 +72,22 @@ def parse_month_to_num(month_value):
         return int(m.group(1))
     return None
 
+
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
         c = ws.cell(row=1, column=col_idx, value=h)
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
 
+
 def clean_instructor_name(name):
-    """Remove brackets content."""
+    """Remove brackets content and trim."""
     if not name:
         return None
     return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
 
-# ---------- STAFF LOADER ----------
+
+# ---------- STAFF LOADER (unchanged) ----------
 def preload_staff(staff_file):
     """Load staff workbook once and build {sheet -> {activity -> [instrs]}}"""
     wb = load_workbook(staff_file, data_only=True)
@@ -115,58 +121,40 @@ def preload_staff(staff_file):
         result[sheet] = sheet_map
     return result
 
-def build_event_names(sheet_name, resort, activity, product, age_group, guest_price, staff_price):
-    """Build one or more event names according to sheet rules."""
-    out = []
-    act = safe_str(activity)
-    res = safe_str(resort)
-    prod = safe_str(product)
-    ag = safe_str(age_group)
-    if not act:
-        return out
-    sheet_name = sheet_name.upper()
-    if sheet_name == "AKUN":
-        if ag == "13+":
-            if guest_price:
-                out.append(f"{act} - {res}")
-            if staff_price:
-                out.append(f"{act} - {res} - Staff")
-        elif re.search(r"8\s*-\s*12", ag) or "8-12" in ag or "years" in ag.lower():
-            if guest_price:
-                out.append(f"{act} - {res} - Child")
-            if staff_price:
-                out.append(f"{act} - {res} - RSG Staff - Child")
-        else:
-            if guest_price:
-                out.append(f"{act} - {res}")
-            if staff_price:
-                out.append(f"{act} - {res} - Staff")
-    elif sheet_name in ("WAMA", "GALAXEA"):
-        base = f"{act} - {res}" if res else act
-        if prod:
-            base = f"{base} - {prod}"
-        if guest_price:
-            out.append(base)
-        if staff_price:
-            out.append(base + " - Staff")
-    return out
 
-def get_light_fill():
-    """Return a random light color PatternFill."""
-    colors = [
-        "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
-        "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
-    ]
-    hexcolor = random.choice(colors)
-    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
+# ---------- NEW: activity -> resorts detection ----------
+def build_activity_resort_map(wb_src):
+    """Return dict: activity_lower -> set of resorts where it appears."""
+    m = {}
+    for sheet_name in wb_src.sheetnames:
+        if sheet_name.upper() not in TARGET_SHEETS:
+            continue
+        ws = wb_src[sheet_name]
+        # map headers on this sheet
+        headers = {safe_str(c.value).lower(): idx + 1 for idx, c in enumerate(ws[1])}
+        activity_col = headers.get("activity")
+        resort_col = headers.get("resort name")
+        if not activity_col:
+            continue
+        for r in range(2, ws.max_row + 1):
+            activity = safe_str(ws.cell(row=r, column=activity_col).value)
+            if not activity:
+                continue
+            resort = safe_str(ws.cell(row=r, column=resort_col).value) if resort_col else ""
+            m.setdefault(activity.lower(), set()).add(resort)
+    return m
+
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
-    instructors_map = preload_staff(staff_file)
+    instructors_map = preload_staff(staff_file)  # {sheet: {activity: [instrs]}}
     wb_src = load_workbook(events_file, data_only=True)
+
+    # build map to know when an activity appears with multiple resorts
+    activity_resort_map = build_activity_resort_map(wb_src)
+
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
-    activity_cache = {}  # raw activity -> instructors
     event_color_cache = {}  # ensure same event always has same color
 
     for sheet_name in wb_src.sheetnames:
@@ -207,9 +195,7 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             resort = safe_str(ws_src.cell(row=r, column=resort_col).value) if resort_col else ""
             product = safe_str(ws_src.cell(row=r, column=product_col).value) if product_col else ""
-            age_group = safe_str(ws_src.cell(row=r, column=age_col).value) if age_col else ""
-            guest_price = ws_src.cell(row=r, column=guest_col).value if guest_col else None
-            staff_price = ws_src.cell(row=r, column=staff_col).value if staff_col else None
+            # ignore age/price per request
             duration = safe_str(ws_src.cell(row=r, column=duration_col).value) if duration_col else ""
             timing = safe_str(ws_src.cell(row=r, column=timing_col).value) if timing_col else ""
             month_val = ws_src.cell(row=r, column=month_col).value
@@ -237,44 +223,58 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            # build event names
-            event_names = build_event_names(sheet_name, resort, activity, product,
-                                            age_group, guest_price, staff_price)
-            if not event_names:
-                continue
-
-            # get instructors (cache)
-            if activity in activity_cache:
-                instrs = activity_cache[activity]
+            # determine event name according to new rules:
+            # - use raw activity name
+            # - if same activity exists on multiple resorts, append resort name to activity
+            activity_key = activity.lower()
+            resorts_for_activity = activity_resort_map.get(activity_key, set())
+            if len(resorts_for_activity) > 1 and resort:
+                event_name = f"{activity} - {resort}"
             else:
-                instrs = instructors_map.get(sheet_name, {}).get(activity, [])
-                activity_cache[activity] = instrs
+                event_name = activity
 
-            for event in event_names:
+            # Default Resource and Configuration should be the actual activity name (raw)
+            default_resource = activity
+            configuration = activity
+
+            # get instructors for this activity from staff sheet mapping
+            instrs = instructors_map.get(sheet_name, {}).get(activity, [])
+
+            # handle timing: if contains '|' split into multiple slots
+            time_slots = [timing]
+            if timing and '|' in timing:
+                parts = [p.strip() for p in timing.split('|') if p.strip()]
+                if parts:
+                    time_slots = parts
+
+            for slot in time_slots:
+                # parse slot into start/end if '-' present
+                start_time = None
+                end_time = None
+                if slot and '-' in slot:
+                    parts = [p.strip() for p in slot.split('-', 1)]
+                    start_time = parts[0] if parts[0] else None
+                    end_time = parts[1] if len(parts) > 1 and parts[1] else None
+                else:
+                    start_time = slot if slot else None
+
                 # reuse same color for same event
-                if event not in event_color_cache:
-                    event_color_cache[event] = get_light_fill()
-                fill = event_color_cache[event]
+                if event_name not in event_color_cache:
+                    # subtle consistent color by hashing event name
+                    event_color_cache[event_name] = get_light_fill()
+                fill = event_color_cache[event_name]
 
-                # main event row
-                for col_idx, val in enumerate([event, event, activity, date_str], start=1):
-                    ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
-                if "-" in timing:
-                    parts = [p.strip() for p in timing.split("-", 1)]
-                    ws_out.cell(row=out_row, column=5, value=parts[0]).fill = fill
-                    if len(parts) > 1:
-                        ws_out.cell(row=out_row, column=6, value=parts[1]).fill = fill
+                # main event row (Event, Resource, Configuration, Date, Start Time, End Time)
+                for col_idx, val in enumerate([event_name, default_resource, configuration, date_str, start_time or "", end_time or ""], start=1):
+                    c = ws_out.cell(row=out_row, column=col_idx, value=val)
+                    c.fill = fill
                 out_row += 1
 
                 # instructor rows (same shading)
                 for instr in instrs:
-                    for col_idx, val in enumerate([event, instr, activity, date_str], start=1):
-                        ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
-                    if "-" in timing:
-                        parts = [p.strip() for p in timing.split("-", 1)]
-                        ws_out.cell(row=out_row, column=5, value=parts[0]).fill = fill
-                        if len(parts) > 1:
-                            ws_out.cell(row=out_row, column=6, value=parts[1]).fill = fill
+                    for col_idx, val in enumerate([event_name, instr, configuration, date_str, start_time or "", end_time or ""], start=1):
+                        c = ws_out.cell(row=out_row, column=col_idx, value=val)
+                        c.fill = fill
                     out_row += 1
 
     wb_out.save(output_file)
