@@ -1,15 +1,32 @@
 import re
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
+from datetime import datetime
 import random
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"  # ignore instructor if event cell red
+TARGET_RED = "FFC00000"    # ignore instructor if event cell red
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
+
+# mapping month names/abbreviations to numbers
+MONTH_MAP = {
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12
+}
 
 # ---------- HELPERS ----------
 def safe_str(v):
@@ -39,13 +56,16 @@ def parse_month_to_num(month_value):
         return None
     if s.isdigit() and 1 <= int(s) <= 12:
         return int(s)
-    month_map = {
-        "january":1,"jan":1,"february":2,"feb":2,"march":3,"mar":3,"april":4,"apr":4,
-        "may":5,"june":6,"jun":6,"july":7,"jul":7,"august":8,"aug":8,"september":9,"sep":9,"sept":9,
-        "october":10,"oct":10,"november":11,"nov":11,"december":12,"dec":12
-    }
     key = s.lower()
-    return month_map.get(key) or (int(re.search(r"\b(1[0-2]|0?[1-9])\b", s).group()) if re.search(r"\b(1[0-2]|0?[1-9])\b", s) else None)
+    if key in MONTH_MAP:
+        return MONTH_MAP[key]
+    for name, num in MONTH_MAP.items():
+        if name in key:
+            return num
+    m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
+    if m:
+        return int(m.group(1))
+    return None
 
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
@@ -58,6 +78,15 @@ def clean_instructor_name(name):
         return None
     return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
 
+def get_light_fill():
+    colors = [
+        "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
+        "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
+    ]
+    hexcolor = random.choice(colors)
+    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
+
+# ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -90,22 +119,16 @@ def preload_staff(staff_file):
         result[sheet] = sheet_map
     return result
 
-def get_light_fill():
-    colors = [
-        "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
-        "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
-    ]
-    hexcolor = random.choice(colors)
-    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
-
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
     instructors_map = preload_staff(staff_file)
     wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
+
     event_color_cache = {}
-    
+    seen_events = set()  # track duplicates
+
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
             continue
@@ -113,7 +136,13 @@ def generate_output(events_file, staff_file, output_file):
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
-        header_map = {safe_str(ws_src.cell(row=1, column=c).value).lower(): c for c in range(1, ws_src.max_column+1) if ws_src.cell(row=1, column=c).value}
+        # map headers
+        header_map = {}
+        for c in range(1, ws_src.max_column + 1):
+            val = ws_src.cell(row=1, column=c).value
+            if val:
+                header_map[safe_str(val).lower()] = c
+
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         duration_col = header_map.get("activity duration")
@@ -125,10 +154,10 @@ def generate_output(events_file, staff_file, output_file):
 
         date_start_col = month_col + 1
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
-        out_row = 2
-        activity_seen = set()  # track activity per resort for uniqueness
 
-        for r in range(2, ws_src.max_row+1):
+        out_row = 2
+
+        for r in range(2, ws_src.max_row + 1):
             activity = safe_str(ws_src.cell(row=r, column=activity_col).value)
             if not activity:
                 continue
@@ -141,7 +170,7 @@ def generate_output(events_file, staff_file, output_file):
                 continue
 
             first_day = None
-            for col in range(date_start_col, max_check_col+1):
+            for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(row=r, column=col)
                 try:
                     if c.value is not None and float(c.value) > 0:
@@ -158,33 +187,38 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            # always append resort to activity name for uniqueness
-            event_name = f"{activity} - {resort}" if (activity, resort) not in activity_seen else activity
-            activity_seen.add((activity, resort))
+            event_name = f"{activity} - {resort}" if resort else activity
+
+            # skip duplicates
+            if (sheet_name, event_name) in seen_events:
+                continue
+            seen_events.add((sheet_name, event_name))
+
+            instrs = instructors_map.get(sheet_name, {}).get(activity, [])
 
             if event_name not in event_color_cache:
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # handle multiple time slots
-            time_slots = [timing] if '|' not in timing else [t.strip() for t in timing.split('|')]
-            for slot in time_slots:
-                if not slot:
-                    continue
-                if '-' in slot:
-                    start_time, end_time = [p.strip() for p in slot.split('-', 1)]
+            timing_slots = [timing]
+            if "|" in timing:
+                timing_slots = [t.strip() for t in timing.split("|") if t.strip()]
+
+            for slot in timing_slots:
+                start, end = None, None
+                if "-" in slot:
+                    parts = [p.strip() for p in slot.split("-", 1)]
+                    if len(parts) == 2:
+                        start, end = parts
                 else:
-                    start_time, end_time = slot, ''
-                
-                # main event row
-                for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
+                    start = slot
+
+                for col_idx, val in enumerate([event_name, activity, activity, date_str, start, end], start=1):
                     ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructor rows
-                instrs = instructors_map.get(sheet_name, {}).get(activity, [])
                 for instr in instrs:
-                    for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
+                    for col_idx, val in enumerate([event_name, instr, activity, date_str, start, end], start=1):
                         ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                     out_row += 1
 
