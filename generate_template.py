@@ -200,9 +200,14 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            timing_slots = [timing]
-            if "|" in timing:
+            # ----------- FIXED TIMING LOGIC -----------
+            timing_slots = []
+            if "|" in timing:  # multiple timeslots
                 timing_slots = [t.strip() for t in timing.split("|") if t.strip()]
+            elif "-" in timing:  # single timeslot with start-end
+                timing_slots = [timing.strip()]
+            else:  # only start time or empty
+                timing_slots = [timing.strip()] if timing.strip() else []
 
             for slot in timing_slots:
                 start, end = None, None
@@ -211,16 +216,19 @@ def generate_output(events_file, staff_file, output_file):
                     if len(parts) == 2:
                         start, end = parts
                 else:
-                    start = slot
+                    start = slot  # only start time, no end time
 
+                # main event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start, end], start=1):
                     ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                 out_row += 1
 
+                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start, end], start=1):
                         ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                     out_row += 1
+            # ----------- END FIXED TIMING LOGIC -----------
 
     wb_out.save(output_file)
     print(f"✅ Output saved to {output_file}")
