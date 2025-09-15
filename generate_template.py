@@ -62,7 +62,7 @@ def parse_month_to_num(month_value):
     for name, num in MONTH_MAP.items():
         if name in key:
             return num
-    m = re.search(r"\\b(1[0-2]|0?[1-9])\\b", s)
+    m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
     if m:
         return int(m.group(1))
     return None
@@ -76,7 +76,7 @@ def add_headers(ws):
 def clean_instructor_name(name):
     if not name:
         return None
-    return re.sub(r"\\s*\\(.*?\\)\\s*", "", str(name)).strip()
+    return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
 
 def get_light_fill():
     colors = [
@@ -125,25 +125,8 @@ def generate_output(events_file, staff_file, output_file):
     wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
+    activity_cache = {}
     event_color_cache = {}
-
-    # Find duplicate activities across resorts
-    activity_resorts = {}
-    for sheet_name in wb_src.sheetnames:
-        if sheet_name.upper() not in TARGET_SHEETS:
-            continue
-        ws = wb_src[sheet_name]
-        header_map = {safe_str(ws.cell(row=1, column=c).value).lower(): c for c in range(1, ws.max_column + 1)}
-        activity_col = header_map.get("activity")
-        resort_col = header_map.get("resort name")
-        if not activity_col:
-            continue
-        for r in range(2, ws.max_row + 1):
-            act = safe_str(ws.cell(row=r, column=activity_col).value)
-            if not act:
-                continue
-            resort = safe_str(ws.cell(row=r, column=resort_col).value) if resort_col else ""
-            activity_resorts.setdefault(act, set()).add(resort)
 
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
@@ -152,7 +135,12 @@ def generate_output(events_file, staff_file, output_file):
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
-        header_map = {safe_str(ws_src.cell(row=1, column=c).value).lower(): c for c in range(1, ws_src.max_column + 1)}
+        header_map = {}
+        for c in range(1, ws_src.max_column + 1):
+            val = ws_src.cell(row=1, column=c).value
+            if val:
+                header_map[safe_str(val).lower()] = c
+
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         duration_col = header_map.get("activity duration")
@@ -164,6 +152,7 @@ def generate_output(events_file, staff_file, output_file):
 
         date_start_col = month_col + 1
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
+
         out_row = 2
 
         for r in range(2, ws_src.max_row + 1):
@@ -196,39 +185,49 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            # Event name logic
-            if len(activity_resorts.get(activity, [])) > 1 and resort:
-                event_name = f"{activity} - {resort}"
+            # Event name is always activity + resort
+            event_name = f"{activity} - {resort}" if resort else activity
+
+            if activity in activity_cache:
+                instrs = activity_cache[activity]
             else:
-                event_name = activity
+                instrs = instructors_map.get(sheet_name, {}).get(activity, [])
+                activity_cache[activity] = instrs
 
             if event_name not in event_color_cache:
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            instrs = instructors_map.get(sheet_name, {}).get(activity, [])
+            # Handle multiple time slots separated by |
+            timing_slots = [t.strip() for t in timing.split("|") if t.strip()] if timing else [""]
 
-            # Handle timing slots
-            timing_slots = [timing] if "|" not in timing else [t.strip() for t in timing.split("|")]
             for slot in timing_slots:
-                start, end = "", ""
+                start_time, end_time = None, None
                 if "-" in slot:
                     parts = [p.strip() for p in slot.split("-", 1)]
-                    start, end = parts[0], parts[1] if len(parts) > 1 else ""
-                else:
-                    start = slot.strip()
+                    start_time = parts[0]
+                    if len(parts) > 1:
+                        end_time = parts[1]
+                elif slot:
+                    start_time = slot
 
-                # Main event row
-                row_vals = [event_name, activity, activity, date_str, start, end]
-                for col_idx, val in enumerate(row_vals, start=1):
+                # main event row
+                for col_idx, val in enumerate([event_name, activity, activity, date_str], start=1):
                     ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
+                if start_time:
+                    ws_out.cell(row=out_row, column=5, value=start_time).fill = fill
+                if end_time:
+                    ws_out.cell(row=out_row, column=6, value=end_time).fill = fill
                 out_row += 1
 
-                # Instructor rows
+                # instructor rows
                 for instr in instrs:
-                    row_vals = [event_name, instr, activity, date_str, start, end]
-                    for col_idx, val in enumerate(row_vals, start=1):
+                    for col_idx, val in enumerate([event_name, instr, activity, date_str], start=1):
                         ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
+                    if start_time:
+                        ws_out.cell(row=out_row, column=5, value=start_time).fill = fill
+                    if end_time:
+                        ws_out.cell(row=out_row, column=6, value=end_time).fill = fill
                     out_row += 1
 
     wb_out.save(output_file)
