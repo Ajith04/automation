@@ -200,22 +200,19 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # ----------- STRICT TIMING LOGIC (start-end required) -----------
+            # ----------- TIMING LOGIC (regex based) -----------
             if not timing:
-                print(f"⚠️ No timing for '{event_name}' in sheet '{sheet_name}' row {r}; skipping.")
                 continue
 
-            timing_slots = [t.strip() for t in timing.split("|") if t.strip()]
+            # extract all "HH:MM - HH:MM" slots
+            timing_slots = re.findall(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", timing)
+
+            if not timing_slots:
+                continue
 
             for slot in timing_slots:
-                # REQUIRE a '-' (start and end). If missing or malformed, skip and warn.
-                if "-" not in slot:
-                    print(f"⚠️ Skipping timeslot (no '-') for event '{event_name}' in sheet '{sheet_name}' row {r}: '{slot}'")
-                    continue
-
                 parts = [p.strip() for p in slot.split("-", 1)]
-                if len(parts) != 2 or not parts[0] or not parts[1]:
-                    print(f"⚠️ Skipping malformed timeslot for event '{event_name}' in sheet '{sheet_name}' row {r}: '{slot}'")
+                if len(parts) != 2:
                     continue
 
                 start, end = parts
@@ -225,7 +222,7 @@ def generate_output(events_file, staff_file, output_file):
                     ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructor rows (one per instructor, per timeslot)
+                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start, end], start=1):
                         ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
