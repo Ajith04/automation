@@ -12,7 +12,6 @@ HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="s
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
 
-# mapping month names/abbreviations to numbers
 MONTH_MAP = {
     "january": 1, "jan": 1,
     "february": 2, "feb": 2,
@@ -62,7 +61,7 @@ def parse_month_to_num(month_value):
     for name, num in MONTH_MAP.items():
         if name in key:
             return num
-    m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
+    m = re.search(r"\\b(1[0-2]|0?[1-9])\\b", s)
     if m:
         return int(m.group(1))
     return None
@@ -76,7 +75,7 @@ def add_headers(ws):
 def clean_instructor_name(name):
     if not name:
         return None
-    return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
+    return re.sub(r"\\s*\\(.*?\\)\\s*", "", str(name)).strip()
 
 def get_light_fill():
     colors = [
@@ -85,6 +84,24 @@ def get_light_fill():
     ]
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
+
+# ---------- BOOKABLE HOURS LOADER ----------
+def extract_bookable_options(ws, col_idx):
+    """Extracts Bookable Hours dropdown values (range reference)."""
+    options = []
+    for dv in ws.parent.data_validations.dataValidation:
+        if dv.type == "list" and dv.formula1:
+            if dv.sqref and any(str(c) == str(ws.cell(row=1, column=col_idx).coordinate) for c in dv.sqref.cells):
+                formula = dv.formula1.replace("=", "")
+                if "!" in formula:  # range in another sheet
+                    sheet_name, cell_range = formula.split("!")
+                    sheet_name = sheet_name.strip("'")
+                    rng = ws.parent[sheet_name][cell_range]
+                    for row in rng:
+                        for cell in row:
+                            if cell.value:
+                                options.append(str(cell.value).strip())
+    return options
 
 # ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
@@ -127,7 +144,7 @@ def generate_output(events_file, staff_file, output_file):
     wb_out.remove(wb_out.active)
 
     event_color_cache = {}
-    seen_events = set()  # track duplicates
+    seen_events = set()
 
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
@@ -136,7 +153,6 @@ def generate_output(events_file, staff_file, output_file):
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
-        # map headers
         header_map = {}
         for c in range(1, ws_src.max_column + 1):
             val = ws_src.cell(row=1, column=c).value
@@ -146,10 +162,10 @@ def generate_output(events_file, staff_file, output_file):
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         duration_col = header_map.get("activity duration")
-        timing_col = header_map.get("timing availability")
         month_col = header_map.get("month")
+        bookable_col = header_map.get("bookable hours")
 
-        if month_col is None or activity_col is None:
+        if month_col is None or activity_col is None or bookable_col is None:
             continue
 
         date_start_col = month_col + 1
@@ -163,7 +179,6 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             resort = safe_str(ws_src.cell(row=r, column=resort_col).value) if resort_col else ""
             duration = safe_str(ws_src.cell(row=r, column=duration_col).value) if duration_col else ""
-            timing = safe_str(ws_src.cell(row=r, column=timing_col).value) if timing_col else ""
             month_val = ws_src.cell(row=r, column=month_col).value
 
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
@@ -189,7 +204,6 @@ def generate_output(events_file, staff_file, output_file):
 
             event_name = f"{activity} - {resort}" if resort else activity
 
-            # skip duplicates
             if (sheet_name, event_name) in seen_events:
                 continue
             seen_events.add((sheet_name, event_name))
@@ -200,34 +214,23 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # ----------- TIMING LOGIC (regex based) -----------
-            if not timing:
-                continue
+            # get timeslots from Bookable Hours dropdown list
+            slots = extract_bookable_options(ws_src, bookable_col)
 
-            # extract all "HH:MM - HH:MM" slots
-            timing_slots = re.findall(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", timing)
+            for slot in slots:
+                if "-" in slot:
+                    start, end = [p.strip() for p in slot.split("-", 1)]
+                else:
+                    start, end = slot.strip(), ""
 
-            if not timing_slots:
-                continue
-
-            for slot in timing_slots:
-                parts = [p.strip() for p in slot.split("-", 1)]
-                if len(parts) != 2:
-                    continue
-
-                start, end = parts
-
-                # main event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start, end], start=1):
                     ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start, end], start=1):
                         ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                     out_row += 1
-            # ----------- END TIMING LOGIC -----------
 
     wb_out.save(output_file)
     print(f"✅ Output saved to {output_file}")
