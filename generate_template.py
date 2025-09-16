@@ -10,7 +10,7 @@ TARGET_RED = "FFC00000"    # ignore instructor if event cell red
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
-YEAR_FOR_OUTPUT = datetime.now().year  # use current year dynamically
+YEAR_FOR_OUTPUT = datetime.now().year  # ✅ current year
 
 # ---------- HELPERS ----------
 def safe_str(v):
@@ -35,11 +35,10 @@ def is_red(cell):
 def parse_month_to_num(month_value):
     """
     Converts a month string or number to its corresponding month number (1-12).
-    Supports:
-    - Numeric strings or integers: "9", 9 → 9
-    - Full month names: "September" → 9
-    - Abbreviations: "Sep", "sept" → 9
-    Returns None if parsing fails.
+    Handles:
+      - Integers or numeric strings ("9" → 9)
+      - Full month names ("September" → 9)
+      - Abbreviations ("Sep", "Sept." → 9)
     """
     if month_value is None:
         return None
@@ -48,14 +47,16 @@ def parse_month_to_num(month_value):
     if not s:
         return None
 
-    # Direct numeric month
+    # Remove punctuation (like "Sept.")
+    s = re.sub(r"[^\w]", "", s)
+
+    # Direct numeric
     if s.isdigit():
         n = int(s)
         if 1 <= n <= 12:
             return n
         return None
 
-    # Mapping of month names/abbreviations
     MONTH_MAP = {
         "january": 1, "jan": 1,
         "february": 2, "feb": 2,
@@ -71,11 +72,7 @@ def parse_month_to_num(month_value):
         "december": 12, "dec": 12
     }
 
-    # Exact match
-    if s in MONTH_MAP:
-        return MONTH_MAP[s]
-
-    return None
+    return MONTH_MAP.get(s)
 
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
