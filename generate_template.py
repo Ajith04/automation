@@ -13,6 +13,7 @@ HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="s
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
 
+# mapping month names/abbreviations to numbers
 MONTH_MAP = {
     "january": 1, "jan": 1,
     "february": 2, "feb": 2,
@@ -32,7 +33,6 @@ MONTH_MAP = {
 def safe_str(v):
     return "" if v is None else str(v).strip()
 
-
 def get_rgb(cell):
     if cell is None:
         return None
@@ -46,10 +46,8 @@ def get_rgb(cell):
         return str(color.rgb).upper()
     return None
 
-
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
-
 
 def parse_month_to_num(month_value):
     if month_value is None:
@@ -65,11 +63,10 @@ def parse_month_to_num(month_value):
     for name, num in MONTH_MAP.items():
         if name in key:
             return num
-    m = re.search(r"\\b(1[0-2]|0?[1-9])\\b", s)
+    m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
     if m:
         return int(m.group(1))
     return None
-
 
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
@@ -77,12 +74,10 @@ def add_headers(ws):
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
 
-
 def clean_instructor_name(name):
     if not name:
         return None
-    return re.sub(r"\\s*\\(.*?\\)\\s*", "", str(name)).strip()
-
+    return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
 
 def get_light_fill():
     colors = [
@@ -91,98 +86,6 @@ def get_light_fill():
     ]
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
-
-
-# ---------- BOOKABLE HOURS EXTRACTION ----------
-def extract_bookable_options(ws, bookable_col):
-    """Extract dropdown options for the Bookable Hours column by inspecting
-    the worksheet's data validations. Returns a list of option strings.
-
-    This handles:
-      - Inline lists in formula1 (e.g. "\"08:00 - 10:00,17:00 - 19:00\"")
-      - Range references to another sheet (e.g. =BookableHours!$A$1:$A$10)
-    """
-    options = []
-
-    dv_container = getattr(ws, "data_validations", None)
-    if not dv_container:
-        return []
-
-    dv_list = getattr(dv_container, "dataValidation", []) or []
-
-    for dv in dv_list:
-        # dv.sqref is the cell/range(s) this validation applies to
-        if not getattr(dv, "sqref", None):
-            continue
-        sqref_str = str(dv.sqref)
-        # sqref may contain multiple ranges separated by spaces
-        for part in sqref_str.split():
-            try:
-                min_col, min_row, max_col, max_row = range_boundaries(part)
-            except Exception:
-                # not a range we can parse
-                continue
-            # if the Bookable Hours column falls into this dv range, process formula
-            if bookable_col < min_col or bookable_col > max_col:
-                continue
-
-            f = getattr(dv, "formula1", None)
-            if not f:
-                continue
-            fstr = str(f).strip()
-
-            # inline list like "08:00 - 10:00,17:00 - 19:00"
-            if fstr.startswith('"') and fstr.endswith('"'):
-                raw = fstr.strip('"')
-                for opt in [o.strip() for o in raw.split(',') if o.strip()]:
-                    options.append(opt)
-                continue
-
-            # otherwise it's likely a range reference like =SheetName!$A$1:$A$10
-            formula = fstr.lstrip('=')
-            if '!' in formula:
-                sheet_name, cell_range = formula.split('!', 1)
-                sheet_name = sheet_name.strip("'")
-                try:
-                    rng = ws.parent[sheet_name][cell_range]
-                except Exception:
-                    # if we cannot resolve the range, skip
-                    continue
-                for row in rng:
-                    for cell in row:
-                        if cell.value is not None and str(cell.value).strip():
-                            options.append(str(cell.value).strip())
-                continue
-
-            # fallback: try to resolve named ranges in the workbook
-            try:
-                named = ws.parent.defined_names.get(formula)
-            except Exception:
-                named = None
-            if named:
-                # defined_names[formula].destinations yields (sheetname, coord)
-                try:
-                    for title, coord in ws.parent.defined_names[formula].destinations:
-                        try:
-                            rng = ws.parent[title][coord]
-                        except Exception:
-                            continue
-                        for row in rng:
-                            for cell in row:
-                                if cell.value is not None and str(cell.value).strip():
-                                    options.append(str(cell.value).strip())
-                except Exception:
-                    pass
-
-    # preserve order and remove duplicates
-    seen = set()
-    unique = []
-    for o in options:
-        if o not in seen:
-            seen.add(o)
-            unique.append(o)
-    return unique
-
 
 # ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
@@ -217,17 +120,46 @@ def preload_staff(staff_file):
         result[sheet] = sheet_map
     return result
 
+# ---------- BOOKABLE HOURS (Dropdown) ----------
+def get_bookable_slots(ws, row, col):
+    """Get timeslots for a specific row/col cell from its dropdown validation"""
+    slots = []
+    for dv in ws.data_validations.dataValidation:
+        for ref in dv.sqref.ranges:
+            min_col, min_row, max_col, max_row = range_boundaries(str(ref))
+            if min_col <= col <= max_col and min_row <= row <= max_row:
+                formula = dv.formula1
+                if not formula:
+                    continue
+                # case: range reference to another sheet
+                if "!" in formula:
+                    sheet_name, rng = formula.replace("=", "").split("!")
+                    sheet_name = sheet_name.strip("'")
+                    if sheet_name in ws.parent.sheetnames:
+                        ws_target = ws.parent[sheet_name]
+                        minc, minr, maxc, maxr = range_boundaries(rng)
+                        for rr in range(minr, maxr + 1):
+                            val = safe_str(ws_target.cell(row=rr, column=minc).value)
+                            if val:
+                                slots.append(val)
+                # case: inline list
+                elif formula.startswith('"') and formula.endswith('"'):
+                    items = formula.strip('"').split(",")
+                    for it in items:
+                        val = safe_str(it)
+                        if val:
+                            slots.append(val)
+    return slots
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
     instructors_map = preload_staff(staff_file)
-    # load workbook WITHOUT data_only so we can inspect data validation formulas
-    wb_src = load_workbook(events_file, data_only=False)
+    wb_src = load_workbook(events_file, data_only=False)  # keep validation formulas
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
 
     event_color_cache = {}
-    seen_events = set()
+    seen_events = set()  # track duplicates
 
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
@@ -236,6 +168,7 @@ def generate_output(events_file, staff_file, output_file):
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
+        # map headers
         header_map = {}
         for c in range(1, ws_src.max_column + 1):
             val = ws_src.cell(row=1, column=c).value
@@ -245,14 +178,11 @@ def generate_output(events_file, staff_file, output_file):
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         duration_col = header_map.get("activity duration")
-        month_col = header_map.get("month")
         bookable_col = header_map.get("bookable hours")
+        month_col = header_map.get("month")
 
         if month_col is None or activity_col is None or bookable_col is None:
             continue
-
-        date_start_col = month_col + 1
-        max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
 
         out_row = 2
 
@@ -267,26 +197,15 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            first_day = None
-            for col in range(date_start_col, max_check_col + 1):
-                c = ws_src.cell(row=r, column=col)
-                try:
-                    if c.value is not None and float(c.value) > 0:
-                        hdr = ws_src.cell(row=1, column=col).value
-                        first_day = int(hdr)
-                        break
-                except:
-                    continue
-            if not first_day:
-                continue
-
             month_num = parse_month_to_num(month_val)
             if not month_num:
                 continue
-            date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
+            # always pick day=1 (since Bookable Hours slots give time, not day)
+            date_str = f"01/{month_num:02d}/{YEAR_FOR_OUTPUT}"
             event_name = f"{activity} - {resort}" if resort else activity
 
+            # skip duplicates
             if (sheet_name, event_name) in seen_events:
                 continue
             seen_events.add((sheet_name, event_name))
@@ -297,26 +216,20 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # extract all slots from the Bookable Hours dropdown range referenced by the
-            # data validation for this column
-            slots = extract_bookable_options(ws_src, bookable_col)
-            if not slots:
-                print(f"⚠️ No bookable slots found for event '{event_name}' (sheet {sheet_name}) row {r}")
-                continue
+            # --- NEW: resolve dropdown slots per row ---
+            slots = get_bookable_slots(ws_src, r, bookable_col)
 
             for slot in slots:
                 if "-" in slot:
-                    start, end = [p.strip() for p in slot.split("-", 1)]
+                    parts = [p.strip() for p in slot.split("-", 1)]
+                    start, end = parts if len(parts) == 2 else (parts[0], "")
                 else:
-                    # defensive: if a cell in the bookable range isn't in start-end form,
-                    # skip it
-                    print(f"⚠️ Skipping malformed bookable slot for '{event_name}': '{slot}'")
-                    continue
-
+                    start, end = slot, ""
+                # base event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start, end], start=1):
                     ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                 out_row += 1
-
+                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start, end], start=1):
                         ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
