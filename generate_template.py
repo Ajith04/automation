@@ -1,6 +1,7 @@
 import re
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import range_boundaries
 from datetime import datetime
 import random
 
@@ -31,6 +32,7 @@ MONTH_MAP = {
 def safe_str(v):
     return "" if v is None else str(v).strip()
 
+
 def get_rgb(cell):
     if cell is None:
         return None
@@ -44,8 +46,10 @@ def get_rgb(cell):
         return str(color.rgb).upper()
     return None
 
+
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
+
 
 def parse_month_to_num(month_value):
     if month_value is None:
@@ -66,16 +70,19 @@ def parse_month_to_num(month_value):
         return int(m.group(1))
     return None
 
+
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
         c = ws.cell(row=1, column=col_idx, value=h)
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
 
+
 def clean_instructor_name(name):
     if not name:
         return None
     return re.sub(r"\\s*\\(.*?\\)\\s*", "", str(name)).strip()
+
 
 def get_light_fill():
     colors = [
@@ -85,23 +92,97 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- BOOKABLE HOURS LOADER ----------
-def extract_bookable_options(ws, col_idx):
-    """Extracts Bookable Hours dropdown values (range reference)."""
+
+# ---------- BOOKABLE HOURS EXTRACTION ----------
+def extract_bookable_options(ws, bookable_col):
+    """Extract dropdown options for the Bookable Hours column by inspecting
+    the worksheet's data validations. Returns a list of option strings.
+
+    This handles:
+      - Inline lists in formula1 (e.g. "\"08:00 - 10:00,17:00 - 19:00\"")
+      - Range references to another sheet (e.g. =BookableHours!$A$1:$A$10)
+    """
     options = []
-    for dv in ws.parent.data_validations.dataValidation:
-        if dv.type == "list" and dv.formula1:
-            if dv.sqref and any(str(c) == str(ws.cell(row=1, column=col_idx).coordinate) for c in dv.sqref.cells):
-                formula = dv.formula1.replace("=", "")
-                if "!" in formula:  # range in another sheet
-                    sheet_name, cell_range = formula.split("!")
-                    sheet_name = sheet_name.strip("'")
+
+    dv_container = getattr(ws, "data_validations", None)
+    if not dv_container:
+        return []
+
+    dv_list = getattr(dv_container, "dataValidation", []) or []
+
+    for dv in dv_list:
+        # dv.sqref is the cell/range(s) this validation applies to
+        if not getattr(dv, "sqref", None):
+            continue
+        sqref_str = str(dv.sqref)
+        # sqref may contain multiple ranges separated by spaces
+        for part in sqref_str.split():
+            try:
+                min_col, min_row, max_col, max_row = range_boundaries(part)
+            except Exception:
+                # not a range we can parse
+                continue
+            # if the Bookable Hours column falls into this dv range, process formula
+            if bookable_col < min_col or bookable_col > max_col:
+                continue
+
+            f = getattr(dv, "formula1", None)
+            if not f:
+                continue
+            fstr = str(f).strip()
+
+            # inline list like "08:00 - 10:00,17:00 - 19:00"
+            if fstr.startswith('"') and fstr.endswith('"'):
+                raw = fstr.strip('"')
+                for opt in [o.strip() for o in raw.split(',') if o.strip()]:
+                    options.append(opt)
+                continue
+
+            # otherwise it's likely a range reference like =SheetName!$A$1:$A$10
+            formula = fstr.lstrip('=')
+            if '!' in formula:
+                sheet_name, cell_range = formula.split('!', 1)
+                sheet_name = sheet_name.strip("'")
+                try:
                     rng = ws.parent[sheet_name][cell_range]
-                    for row in rng:
-                        for cell in row:
-                            if cell.value:
-                                options.append(str(cell.value).strip())
-    return options
+                except Exception:
+                    # if we cannot resolve the range, skip
+                    continue
+                for row in rng:
+                    for cell in row:
+                        if cell.value is not None and str(cell.value).strip():
+                            options.append(str(cell.value).strip())
+                continue
+
+            # fallback: try to resolve named ranges in the workbook
+            try:
+                named = ws.parent.defined_names.get(formula)
+            except Exception:
+                named = None
+            if named:
+                # defined_names[formula].destinations yields (sheetname, coord)
+                try:
+                    for title, coord in ws.parent.defined_names[formula].destinations:
+                        try:
+                            rng = ws.parent[title][coord]
+                        except Exception:
+                            continue
+                        for row in rng:
+                            for cell in row:
+                                if cell.value is not None and str(cell.value).strip():
+                                    options.append(str(cell.value).strip())
+                except Exception:
+                    pass
+
+    # preserve order and remove duplicates
+    seen = set()
+    unique = []
+    for o in options:
+        if o not in seen:
+            seen.add(o)
+            unique.append(o)
+    return unique
+
 
 # ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
@@ -136,10 +217,12 @@ def preload_staff(staff_file):
         result[sheet] = sheet_map
     return result
 
+
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
     instructors_map = preload_staff(staff_file)
-    wb_src = load_workbook(events_file, data_only=True)
+    # load workbook WITHOUT data_only so we can inspect data validation formulas
+    wb_src = load_workbook(events_file, data_only=False)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
 
@@ -214,14 +297,21 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # get timeslots from Bookable Hours dropdown list
+            # extract all slots from the Bookable Hours dropdown range referenced by the
+            # data validation for this column
             slots = extract_bookable_options(ws_src, bookable_col)
+            if not slots:
+                print(f"⚠️ No bookable slots found for event '{event_name}' (sheet {sheet_name}) row {r}")
+                continue
 
             for slot in slots:
                 if "-" in slot:
                     start, end = [p.strip() for p in slot.split("-", 1)]
                 else:
-                    start, end = slot.strip(), ""
+                    # defensive: if a cell in the bookable range isn't in start-end form,
+                    # skip it
+                    print(f"⚠️ Skipping malformed bookable slot for '{event_name}': '{slot}'")
+                    continue
 
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start, end], start=1):
                     ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
