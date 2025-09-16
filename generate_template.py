@@ -10,23 +10,7 @@ TARGET_RED = "FFC00000"    # ignore instructor if event cell red
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
-YEAR_FOR_OUTPUT = 2025
-
-# mapping month names/abbreviations to numbers
-MONTH_MAP = {
-    "january": 1, "jan": 1,
-    "february": 2, "feb": 2,
-    "march": 3, "mar": 3,
-    "april": 4, "apr": 4,
-    "may": 5,
-    "june": 6, "jun": 6,
-    "july": 7, "jul": 7,
-    "august": 8, "aug": 8,
-    "september": 9, "sep": 9, "sept": 9,
-    "october": 10, "oct": 10,
-    "november": 11, "nov": 11,
-    "december": 12, "dec": 12
-}
+YEAR_FOR_OUTPUT = datetime.now().year  # use current year dynamically
 
 # ---------- HELPERS ----------
 def safe_str(v):
@@ -49,22 +33,48 @@ def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
+    """
+    Converts a month string or number to its corresponding month number (1-12).
+    Supports:
+    - Numeric strings or integers: "9", 9 → 9
+    - Full month names: "September" → 9
+    - Abbreviations: "Sep", "sept" → 9
+    Returns None if parsing fails.
+    """
     if month_value is None:
         return None
-    s = str(month_value).strip()
+
+    s = str(month_value).strip().lower()
     if not s:
         return None
-    if s.isdigit() and 1 <= int(s) <= 12:
-        return int(s)
-    key = s.lower()
-    if key in MONTH_MAP:
-        return MONTH_MAP[key]
-    for name, num in MONTH_MAP.items():
-        if name in key:
-            return num
-    m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
-    if m:
-        return int(m.group(1))
+
+    # Direct numeric month
+    if s.isdigit():
+        n = int(s)
+        if 1 <= n <= 12:
+            return n
+        return None
+
+    # Mapping of month names/abbreviations
+    MONTH_MAP = {
+        "january": 1, "jan": 1,
+        "february": 2, "feb": 2,
+        "march": 3, "mar": 3,
+        "april": 4, "apr": 4,
+        "may": 5,
+        "june": 6, "jun": 6,
+        "july": 7, "jul": 7,
+        "august": 8, "aug": 8,
+        "september": 9, "sep": 9, "sept": 9,
+        "october": 10, "oct": 10,
+        "november": 11, "nov": 11,
+        "december": 12, "dec": 12
+    }
+
+    # Exact match
+    if s in MONTH_MAP:
+        return MONTH_MAP[s]
+
     return None
 
 def add_headers(ws):
