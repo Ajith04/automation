@@ -1,3 +1,6 @@
 streamlit
 openpyxl
 pandas
+xlwings==0.16.6
+
+
