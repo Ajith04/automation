@@ -1,6 +1,5 @@
 import re
-import xlwings as xw
-from openpyxl import Workbook
+from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
 from datetime import datetime
 import random
@@ -46,7 +45,6 @@ def parse_month_to_num(month_value):
     for name, num in MONTH_MAP.items():
         if name in key:
             return num
-    import re
     m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
     if m:
         return int(m.group(1))
@@ -73,8 +71,7 @@ def add_headers(ws):
 
 # ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
-    import openpyxl
-    wb = openpyxl.load_workbook(staff_file, data_only=True)
+    wb = load_workbook(staff_file, data_only=True)
     result = {}
     for sheet in TARGET_SHEETS:
         if sheet not in wb.sheetnames:
@@ -102,58 +99,57 @@ def preload_staff(staff_file):
         result[sheet] = sheet_map
     return result
 
-# ---------- BOOKABLE HOURS (xlwings) ----------
-def get_bookable_slots_xw(ws, row, col):
-    """Use xlwings to get dropdown values for a single cell."""
-    cell = ws.range((row, col))
-    try:
-        validation = cell.api.Validation
-        formula = validation.Formula1
-        if not formula:
-            return []
-        formula = formula.strip()
-        # Inline list
-        if formula.startswith('"') and formula.endswith('"'):
-            items = formula.strip('"').split(",")
-            return [safe_str(it) for it in items if safe_str(it)]
-        # Sheet range
-        elif "!" in formula:
-            sheet_name, rng = formula.lstrip("=").split("!")
-            sheet_name = sheet_name.strip("'")
-            rng_cells = ws.parent.sheets[sheet_name].range(rng)
-            return [safe_str(c.value) for c in rng_cells if safe_str(c.value)]
-        # Named range
-        else:
-            rng_cells = ws.parent.names(formula).ref
-            return [safe_str(c.value) for c in rng_cells if safe_str(c.value)]
-    except Exception as e:
-        return []
+# ---------- BOOKABLE HOURS (openpyxl) ----------
+def get_bookable_slots(ws, row, col):
+    """Get dropdown values from openpyxl DataValidation."""
+    cell = ws.cell(row=row, column=col)
+    for dv in ws.data_validations.dataValidation:
+        if cell.coordinate in dv.cells:
+            if dv.type == "list":
+                formula = dv.formula1
+                if not formula:
+                    return []
+                formula = formula.strip()
+                # Inline list
+                if formula.startswith('"') and formula.endswith('"'):
+                    return [v.strip() for v in formula.strip('"').split(",") if v.strip()]
+                # Sheet range
+                elif "!" in formula:
+                    sheet_name, rng = formula.lstrip("=").split("!")
+                    sheet_name = sheet_name.strip("'")
+                    rng_cells = ws.parent[sheet_name][rng]
+                    return [safe_str(c.value) for c in rng_cells if safe_str(c.value)]
+                # Named range
+                else:
+                    # Named ranges
+                    if formula in ws.parent.defined_names:
+                        defn = ws.parent.defined_names[formula]
+                        # defn can reference multiple ranges, just take first
+                        for title, rng in defn.destinations:
+                            rng_cells = ws.parent[title][rng]
+                            return [safe_str(c.value) for c in rng_cells if safe_str(c.value)]
+    return []
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
     instructors_map = preload_staff(staff_file)
-
-    # Open with xlwings
-    app = xw.App(visible=False)
-    wb_src = xw.Book(events_file)
+    wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
 
     event_color_cache = {}
     seen_events = set()
 
-    for sheet_name in wb_src.sheets:
-        if sheet_name.name.strip().upper() not in TARGET_SHEETS:
+    for sheet_name in wb_src.sheetnames:
+        if sheet_name.strip().upper() not in TARGET_SHEETS:
             continue
-        ws_src = sheet_name
-        ws_out = wb_out.create_sheet(sheet_name.name)
+        ws_src = wb_src[sheet_name]
+        ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
         # Map headers
-        header_map = {}
-        for col_idx, val in enumerate(ws_src.range("1:1").value, start=1):
-            if val:
-                header_map[safe_str(val).lower()] = col_idx
+        headers = [safe_str(c.value).lower() for c in ws_src[1]]
+        header_map = {val: idx + 1 for idx, val in enumerate(headers) if val}
 
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
@@ -162,21 +158,19 @@ def generate_output(events_file, staff_file, output_file):
         month_col = header_map.get("month")
 
         if month_col is None or activity_col is None or bookable_col is None:
-            print(f"Skipping sheet {sheet_name.name}: missing required headers")
+            print(f"Skipping sheet {sheet_name}: missing required headers")
             continue
 
         out_row = 2
-
-        last_row = ws_src.used_range.last_cell.row
-        for r in range(2, last_row + 1):
-            activity = safe_str(ws_src.range((r, activity_col)).value)
+        for r in range(2, ws_src.max_row + 1):
+            activity = safe_str(ws_src.cell(row=r, column=activity_col).value)
             if not activity:
                 continue
-            resort = safe_str(ws_src.range((r, resort_col)).value) if resort_col else ""
-            duration = safe_str(ws_src.range((r, duration_col)).value) if duration_col else ""
-            month_val = ws_src.range((r, month_col)).value
+            resort = safe_str(ws_src.cell(row=r, column=resort_col).value) if resort_col else ""
+            duration = safe_str(ws_src.cell(row=r, column=duration_col).value) if duration_col else ""
+            month_val = ws_src.cell(row=r, column=month_col).value
 
-            if sheet_name.name.upper() == "GALAXEA" and "day" in duration.lower():
+            if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
             month_num = parse_month_to_num(month_val)
@@ -186,20 +180,20 @@ def generate_output(events_file, staff_file, output_file):
             date_str = f"01/{month_num:02d}/{YEAR_FOR_OUTPUT}"
             event_name = f"{activity} - {resort}" if resort else activity
 
-            if (sheet_name.name, event_name) in seen_events:
+            if (sheet_name, event_name) in seen_events:
                 continue
-            seen_events.add((sheet_name.name, event_name))
+            seen_events.add((sheet_name, event_name))
 
-            instrs = instructors_map.get(sheet_name.name, {}).get(activity, [])
+            instrs = instructors_map.get(sheet_name, {}).get(activity, [])
 
             if event_name not in event_color_cache:
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # --- Use xlwings to read per-cell dropdown ---
-            slots = get_bookable_slots_xw(ws_src, r, bookable_col)
+            # Get bookable slots
+            slots = get_bookable_slots(ws_src, r, bookable_col)
             if not slots:
-                print(f"No Bookable Hours for row {r} in {sheet_name.name}")
+                print(f"No Bookable Hours for row {r} in {sheet_name}")
                 continue
 
             for slot in slots:
@@ -221,5 +215,4 @@ def generate_output(events_file, staff_file, output_file):
                     out_row += 1
 
     wb_out.save(output_file)
-    wb_src.app.quit()
     print(f"✅ Output saved to {output_file}")
