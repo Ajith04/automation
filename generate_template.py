@@ -53,20 +53,36 @@ def parse_month_to_num(month_value):
     """Convert month string/number to integer 1-12."""
     if month_value is None:
         return None
+
     s = str(month_value).strip()
     if not s:
         return None
+
+    # Case: numeric string or int
     if s.isdigit() and 1 <= int(s) <= 12:
         return int(s)
+
     key = s.lower()
+
+    # ---- Step 1: exact dictionary match ----
     if key in MONTH_MAP:
         return MONTH_MAP[key]
+
+    # ---- Step 2: exact equality with known month keys ----
+    for name, num in MONTH_MAP.items():
+        if key == name:
+            return num
+
+    # ---- Step 3: substring match (e.g., "September 2025") ----
     for name, num in MONTH_MAP.items():
         if name in key:
             return num
+
+    # ---- Step 4: numeric extraction from text ----
     m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
     if m:
         return int(m.group(1))
+
     return None
 
 def add_headers(ws):
