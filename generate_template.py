@@ -12,6 +12,7 @@ HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="s
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
 
+# Month mapping
 MONTH_MAP = {
     "january": 1, "jan": 1,
     "february": 2, "feb": 2,
@@ -32,17 +33,12 @@ def safe_str(v):
     return "" if v is None else str(v).strip()
 
 def get_rgb(cell):
-    if cell is None:
+    if cell is None or not hasattr(cell, "fill"):
         return None
-    fill = getattr(cell, "fill", None)
-    if not fill:
+    color = getattr(cell.fill, "start_color", None)
+    if color is None or not hasattr(color, "rgb"):
         return None
-    color = getattr(fill, "start_color", None)
-    if color is None:
-        return None
-    if hasattr(color, "rgb") and color.rgb:
-        return str(color.rgb).upper()
-    return None
+    return str(color.rgb).upper() if color.rgb else None
 
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
@@ -82,43 +78,48 @@ def get_light_fill():
         "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
         "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
     ]
-    hexcolor = random.choice(colors)
-    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
+    return PatternFill(start_color=random.choice(colors), end_color=random.choice(colors), fill_type="solid")
 
+# ---------- DROPDOWN EXTRACTION ----------
 def get_dropdown_values(ws, cell):
-    """Return all dropdown options for a cell, including inline lists, ranges, named ranges."""
+    """Fetch all dropdown options for a cell, even if it references another sheet or named range."""
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
-        if cell.coordinate not in dv.cells or dv.type != "list" or not dv.formula1:
-            continue
-        f = dv.formula1
-        if f.startswith('"') and f.endswith('"'):  # inline list
-            items = f.strip('"').split(",")
-            dropdowns.extend([i.strip() for i in items if i.strip()])
-        else:  # range or named range
-            ref = f.lstrip("=")
-            # Named range
-            if ref in ws.parent.defined_names:
-                dests = ws.parent.defined_names[ref].destinations
-                for title, area in dests:
-                    ref_ws = ws.parent[title]
-                    for row in ref_ws[area]:
-                        for c in row:
-                            if c.value and '-' in str(c.value):
-                                dropdowns.append(str(c.value).strip())
-            else:  # direct range
-                if "!" in ref:
+        if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
+            f = dv.formula1
+            # Inline list
+            if f.startswith('"') and f.endswith('"'):
+                dropdowns.extend([i.strip() for i in f.strip('"').split(",")])
+            else:
+                # Remove leading '='
+                ref = f.lstrip("=")
+                # Named range
+                if ref in ws.parent.defined_names:
+                    for title, area in ws.parent.defined_names[ref].destinations:
+                        ref_ws = ws.parent[title]
+                        for row in ref_ws[area]:
+                            for c in row:
+                                if c.value:
+                                    dropdowns.append(str(c.value).strip())
+                # Direct range (maybe sheet!)
+                elif "!" in ref:
                     sheet_name, rng = ref.split("!")
+                    sheet_name = sheet_name.strip("'")  # handle 'Sheet Name' with spaces
                     ref_ws = ws.parent[sheet_name]
+                    for row in ref_ws[rng]:
+                        for c in row:
+                            if c.value:
+                                dropdowns.append(str(c.value).strip())
+                # Same sheet range
                 else:
-                    ref_ws = ws
-                    rng = ref
-                for row in ref_ws[rng]:
-                    for c in row:
-                        if c.value and '-' in str(c.value):
-                            dropdowns.append(str(c.value).strip())
-    return list(dict.fromkeys(dropdowns))  # remove duplicates
+                    for row in ws[ref]:
+                        for c in row:
+                            if c.value:
+                                dropdowns.append(str(c.value).strip())
+    # Remove duplicates
+    return list(dict.fromkeys(dropdowns))
 
+# ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -166,8 +167,7 @@ def generate_output(events_file, staff_file, output_file):
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
-        header_map = {safe_str(ws_src.cell(1, c).value).lower(): c
-                      for c in range(1, ws_src.max_column + 1)}
+        header_map = {safe_str(ws_src.cell(1, c).value).lower(): c for c in range(1, ws_src.max_column + 1)}
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         bookable_col = header_map.get("bookable hours")
@@ -181,7 +181,7 @@ def generate_output(events_file, staff_file, output_file):
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
-        # multi-resort activities
+        # detect multi-resort activities
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -201,7 +201,7 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            # first non-empty day
+            # find first non-empty day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -219,7 +219,8 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            if len(activity_resorts.get(activity, [])) > 1 and resort:
+            resorts_for_activity = activity_resorts.get(activity, set())
+            if len(resorts_for_activity) > 1 and resort:
                 event_name = f"{activity} - {resort}"
             else:
                 event_name = activity
@@ -230,23 +231,30 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
+            # fetch all timeslots from Bookable Hours dropdown
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
 
             for slot in time_slots:
-                start_time, end_time = (slot.split("-", 1) + [""])[:2]
-                start_time = start_time.strip()
-                end_time = end_time.strip()
+                slot = slot.strip()
+                if not slot:
+                    continue
+                if "-" in slot:
+                    start_time, end_time = [p.strip() for p in slot.split("-", 1)]
+                else:
+                    start_time, end_time = slot, ""
 
                 key = (event_name, resort, activity, date_str, start_time, end_time)
                 if key in seen_events:
                     continue
                 seen_events.add(key)
 
+                # main event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
+                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
