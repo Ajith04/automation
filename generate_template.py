@@ -6,7 +6,7 @@ from openpyxl.utils import range_boundaries
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"    # ignore instructor if event cell red
+TARGET_RED = "FFC00000"    # ignore red cells
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
@@ -83,11 +83,12 @@ def get_light_fill():
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
 def get_dropdown_values(ws, cell):
-    """Return dropdown options including cross-sheet references."""
+    """Return dropdown options for a specific cell (inline, same-sheet, cross-sheet)."""
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
             f = dv.formula1
+            # Inline list
             if f.startswith('"') and f.endswith('"'):
                 dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
             else:
@@ -100,14 +101,18 @@ def get_dropdown_values(ws, cell):
                 else:
                     ref_ws, rng = ws, ref
 
-                min_col, min_row, max_col, max_row = range_boundaries(rng)
-                for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
-                                            min_col=min_col, max_col=max_col):
-                    for c in row:
-                        if c.value:
-                            dropdowns.append(str(c.value).strip())
-    print(f"Dropdown values found for {cell.coordinate}: {dropdowns}")
-    return list(dict.fromkeys(dropdowns))
+                try:
+                    min_col, min_row, max_col, max_row = range_boundaries(rng)
+                    for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
+                                                min_col=min_col, max_col=max_col):
+                        for c in row:
+                            if c.value:
+                                dropdowns.append(str(c.value).strip())
+                except Exception as e:
+                    print(f"⚠ Failed to read range {rng} for cell {cell.coordinate}: {e}")
+    dropdowns = list(dict.fromkeys(dropdowns))
+    print(f"Dropdown values for {cell.coordinate}: {dropdowns}")
+    return dropdowns
 
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
@@ -143,8 +148,10 @@ def preload_staff(staff_file):
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
+    print("⏳ Loading staff...")
     instructors_map = preload_staff(staff_file)
-    print("✅ Staff preloaded")
+    print("✅ Staff loaded.")
+
     wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
@@ -153,6 +160,7 @@ def generate_output(events_file, staff_file, output_file):
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
             continue
+        print(f"📄 Processing sheet: {sheet_name}")
         ws_src = wb_src[sheet_name]
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
@@ -166,13 +174,14 @@ def generate_output(events_file, staff_file, output_file):
         duration_col = header_map.get("activity duration")
 
         if not (month_col and activity_col and bookable_col):
-            print(f"⚠ Skipping sheet {sheet_name}, missing required columns")
+            print(f"⚠ Missing essential columns in {sheet_name}, skipping...")
             continue
 
         date_start_col = month_col + 1
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
+        # collect resorts per activity
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -192,6 +201,7 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
+            # find first valid day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -202,10 +212,12 @@ def generate_output(events_file, staff_file, output_file):
                 except:
                     continue
             if not first_day:
+                print(f"⚠ No valid day for activity {activity}, row {r}")
                 continue
 
             month_num = parse_month_to_num(month_val)
             if not month_num:
+                print(f"⚠ Invalid month '{month_val}' for activity {activity}, row {r}")
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
@@ -216,15 +228,18 @@ def generate_output(events_file, staff_file, output_file):
                 event_name = activity
 
             instrs = instructors_map.get(sheet_name, {}).get(activity, [])
+            print(f"Activity: {activity}, Time slots: fetching dropdowns, Instructors: {instrs}")
 
             if event_name not in event_color_cache:
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
+            # fetch timeslots from Bookable Hours dropdown (per cell!)
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
 
-            print(f"Activity: {activity}, Time slots: {time_slots}, Instructors: {instrs}")
+            if not time_slots:
+                print(f"⚠ No dropdown values found for activity {activity}, row {r}")
 
             for slot in time_slots:
                 slot = slot.strip()
@@ -240,10 +255,12 @@ def generate_output(events_file, staff_file, output_file):
                     continue
                 seen_events.add(key)
 
+                # event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
+                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
