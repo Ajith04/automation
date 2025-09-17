@@ -3,7 +3,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import coordinate_from_string, column_index_from_string, get_column_letter
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter
 import random
 
 # ---------- CONFIG ----------
