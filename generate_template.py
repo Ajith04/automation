@@ -11,7 +11,7 @@ TARGET_RED = "FFC00000"
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
-YEAR_FOR_OUTPUT = 2025
+YEAR_FOR_OUTPUT = 2025  # you can later replace with current year dynamically
 
 # ---------- HELPERS ----------
 def safe_str(v):
@@ -84,15 +84,11 @@ def get_light_fill():
 
 # ---------- DROPDOWN HANDLING ----------
 def cell_in_dv(cell, dv_range):
-    """Check if a cell is inside a DV range like 'B6:B100'."""
-    if ":" in dv_range:
-        start, end = dv_range.split(":")
-        start_col, start_row = column_index_from_string(coordinate_from_string(start)[0]), coordinate_from_string(start)[1]
-        end_col, end_row = column_index_from_string(coordinate_from_string(end)[0]), coordinate_from_string(end)[1]
-        return start_col <= cell.column <= end_col and start_row <= cell.row <= end_row
-    else:
-        col, row = column_index_from_string(coordinate_from_string(dv_range)[0]), coordinate_from_string(dv_range)[1]
-        return col == cell.column and row == cell.row
+    """Check if a cell is inside a DV range (CellRange object or string)."""
+    if not isinstance(dv_range, str):
+        dv_range = str(dv_range)  # convert CellRange to string
+    min_col, min_row, max_col, max_row = range_boundaries(dv_range)
+    return min_col <= cell.column <= max_col and min_row <= cell.row <= max_row
 
 def get_dropdown_values(ws, cell):
     """Return dropdown values for a cell (inline list or referenced range)."""
@@ -100,7 +96,7 @@ def get_dropdown_values(ws, cell):
     for dv in ws.data_validations.dataValidation:
         if dv.type != "list":
             continue
-        for rng in dv.ranges.ranges:  # iterate over all ranges in MultiCellRange
+        for rng in dv.ranges.ranges:  # iterate all ranges
             if cell_in_dv(cell, rng):
                 f = dv.formula1
                 if f.startswith('"') and f.endswith('"'):
