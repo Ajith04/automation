@@ -2,6 +2,8 @@ import re
 import random
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import column_index_from_string
+import streamlit as st  # For debugging output in Streamlit
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
@@ -32,7 +34,6 @@ def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
-    """Convert month names or numbers into integer 1–12."""
     if month_value is None:
         return None
     s = str(month_value).strip()
@@ -55,12 +56,7 @@ def parse_month_to_num(month_value):
         "december": 12, "dec": 12
     }
     key = s.lower()
-    if key in MONTH_MAP:
-        return MONTH_MAP[key]
-    for name, num in MONTH_MAP.items():
-        if name in key:
-            return num
-    return None
+    return MONTH_MAP.get(key)
 
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
@@ -82,33 +78,28 @@ def get_light_fill():
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
 def get_dropdown_values(ws, cell):
-    """Return all dropdown options for a cell, including cross-sheet references."""
+    """Return dropdown options including cross-sheet references."""
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
             f = dv.formula1
-            print(f"[DEBUG] Validation formula for {cell.coordinate}: {f}")
-
-            if f.startswith('"') and f.endswith('"'):  # inline list
-                items = f.strip('"').split(",")
-                dropdowns.extend([i.strip() for i in items])
-                print("[DEBUG] Inline dropdown items:", dropdowns)
+            st.write(f"Processing dropdown formula: {f}")  # Streamlit debug
+            if f.startswith('"') and f.endswith('"'):
+                dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
             else:
                 ref = f.lstrip("=")
-                if "!" in ref:  # cross-sheet reference
+                if "!" in ref:
                     sheet_name, rng = ref.split("!")
                     sheet_name = sheet_name.strip("'")
-                    print(f"[DEBUG] Cross-sheet dropdown source: {sheet_name}!{rng}")
                     ref_ws = ws.parent[sheet_name]
-                else:  # same-sheet reference
+                else:
                     ref_ws, rng = ws, ref
-                    print(f"[DEBUG] Same-sheet dropdown source: {rng}")
-
+                st.write(f"Fetching dropdown values from {sheet_name if 'sheet_name' in locals() else ws.title} range {rng}")
                 for row in ref_ws[rng]:
                     for c in row:
                         if c.value:
                             dropdowns.append(str(c.value).strip())
-                            print("[DEBUG] Dropdown option:", c.value)
+    st.write(f"Dropdown values found: {dropdowns}")
     return list(dict.fromkeys(dropdowns))  # remove duplicates
 
 def preload_staff(staff_file):
@@ -145,13 +136,17 @@ def preload_staff(staff_file):
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
+    st.write("Loading staff file...")
     instructors_map = preload_staff(staff_file)
+    st.write("Staff mapping loaded:", instructors_map)
+    
     wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     event_color_cache = {}
 
     for sheet_name in wb_src.sheetnames:
+        st.write(f"Processing sheet: {sheet_name}")
         if sheet_name.upper() not in TARGET_SHEETS:
             continue
         ws_src = wb_src[sheet_name]
@@ -160,20 +155,16 @@ def generate_output(events_file, staff_file, output_file):
 
         header_map = {safe_str(ws_src.cell(1, c).value).lower(): c
                       for c in range(1, ws_src.max_column + 1)}
-        print(f"\n[DEBUG] Processing sheet: {sheet_name}")
-        print("[DEBUG] Headers detected:", header_map)
-
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         bookable_col = header_map.get("bookable hours")
         month_col = header_map.get("month")
         duration_col = header_map.get("activity duration")
 
-        print(f"[DEBUG] Column indexes -> Resort:{resort_col}, Activity:{activity_col}, "
-              f"Bookable:{bookable_col}, Month:{month_col}, Duration:{duration_col}")
+        st.write(f"Header mapping: {header_map}")
 
         if not (month_col and activity_col and bookable_col):
-            print("[DEBUG] Missing required columns. Skipping sheet.")
+            st.write(f"Skipping sheet {sheet_name} because some columns are missing")
             continue
 
         date_start_col = month_col + 1
@@ -196,14 +187,9 @@ def generate_output(events_file, staff_file, output_file):
             duration = safe_str(ws_src.cell(r, duration_col).value) if duration_col else ""
             month_val = ws_src.cell(r, month_col).value
 
-            print(f"\n[DEBUG] Row {r} -> Activity:{activity}, Resort:{resort}, "
-                  f"Month:{month_val}, Duration:{duration}")
-
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
-                print("[DEBUG] Skipping GALAXEA row with duration in days")
                 continue
 
-            # find first valid day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -214,33 +200,25 @@ def generate_output(events_file, staff_file, output_file):
                 except:
                     continue
             if not first_day:
-                print("[DEBUG] No valid day found in row.")
                 continue
 
             month_num = parse_month_to_num(month_val)
             if not month_num:
-                print(f"[DEBUG] Could not parse month: {month_val}")
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
-            print("[DEBUG] Parsed date:", date_str)
 
             resorts_for_activity = activity_resorts.get(activity, set())
-            if len(resorts_for_activity) > 1 and resort:
-                event_name = f"{activity} - {resort}"
-            else:
-                event_name = activity
-
+            event_name = f"{activity} - {resort}" if len(resorts_for_activity) > 1 and resort else activity
             instrs = instructors_map.get(sheet_name, {}).get(activity, [])
-            print("[DEBUG] Instructors for activity:", instrs)
 
             if event_name not in event_color_cache:
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # fetch timeslots
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
-            print("[DEBUG] Time slots:", time_slots)
+
+            st.write(f"Activity: {activity}, Time slots: {time_slots}, Instructors: {instrs}")
 
             for slot in time_slots:
                 slot = slot.strip()
@@ -256,18 +234,14 @@ def generate_output(events_file, staff_file, output_file):
                     continue
                 seen_events.add(key)
 
-                # write event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
-                print(f"[DEBUG] Added event row {out_row}: {event_name}, {date_str}, {start_time}-{end_time}")
                 out_row += 1
 
-                # write instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
-                    print(f"[DEBUG] Added instructor row {out_row}: {instr}")
                     out_row += 1
 
     wb_out.save(output_file)
-    print(f"\n✅ Output saved to {output_file}")
+    st.write(f"✅ Output saved to {output_file}")
