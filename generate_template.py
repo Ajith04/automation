@@ -2,7 +2,6 @@ import re
 import random
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import range_boundaries
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
@@ -82,15 +81,9 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- DROPDOWN PARSING ----------
+# ---------- ADVANCED DROPDOWN PARSING ----------
 def get_dropdown_values(ws, cell):
-    """
-    Return all dropdown options for a given cell.
-    Handles:
-      - Inline lists like "Option1,Option2"
-      - Same-sheet ranges like =B2:B10
-      - Cross-sheet ranges like =Availability!B2:B20
-    """
+    """Return dropdown options for a single cell, handling inline and cross-sheet references."""
     dropdowns = []
 
     if not hasattr(ws, "data_validations"):
@@ -100,44 +93,55 @@ def get_dropdown_values(ws, cell):
         if cell.coordinate not in dv.cells or dv.type != "list" or not dv.formula1:
             continue
 
-        f = dv.formula1.strip()
+        formula = dv.formula1.strip()
 
         # Inline list
-        if f.startswith('"') and f.endswith('"'):
-            dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
+        if formula.startswith('"') and formula.endswith('"'):
+            dropdowns.extend([x.strip() for x in formula.strip('"').split(",")])
             continue
 
         # Remove leading '='
-        if f.startswith("="):
-            f = f[1:]
+        if formula.startswith("="):
+            formula = formula[1:]
 
         # Cross-sheet reference
-        if "!" in f:
-            sheet_name, rng = f.split("!")
-            sheet_name = sheet_name.strip("'")
+        if "!" in formula:
+            if formula.startswith("'"):
+                match = re.match(r"'(.+)'!(.+)", formula)
+                if match:
+                    sheet_name, rng = match.groups()
+                else:
+                    print(f"⚠️ Could not parse formula: {formula}")
+                    continue
+            else:
+                sheet_name, rng = formula.split("!", 1)
+            sheet_name = sheet_name.strip()
+            rng = rng.strip()
             if sheet_name in ws.parent.sheetnames:
                 ref_ws = ws.parent[sheet_name]
+                try:
+                    for row in ref_ws[rng]:
+                        for c in row:
+                            if c.value:
+                                dropdowns.append(str(c.value).strip())
+                except Exception as e:
+                    print(f"⚠️ Failed to read range {rng} in sheet {sheet_name}: {e}")
             else:
                 print(f"⚠️ Sheet {sheet_name} not found")
-                continue
         else:
-            ref_ws, rng = ws, f
+            # Same-sheet range
+            ref_ws = ws
+            rng = formula
+            try:
+                for row in ref_ws[rng]:
+                    for c in row:
+                        if c.value:
+                            dropdowns.append(str(c.value).strip())
+            except Exception as e:
+                print(f"⚠️ Failed to read range {rng} in same sheet: {e}")
 
-        # Read values from the range
-        try:
-            min_col, min_row, max_col, max_row = range_boundaries(rng)
-            for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
-                                        min_col=min_col, max_col=max_col):
-                for c in row:
-                    if c.value is not None:
-                        dropdowns.append(str(c.value).strip())
-        except Exception as e:
-            print(f"⚠️ Failed to read range {rng}: {e}")
-
-    # Remove duplicates
-    dropdowns = list(dict.fromkeys(dropdowns))
-    print(f"🔹 Dropdown values for {cell.coordinate}: {dropdowns}")
-    return dropdowns
+    print(f"Dropdown values for {cell.coordinate}: {dropdowns}")
+    return list(dict.fromkeys(dropdowns))
 
 # ---------- STAFF PRELOAD ----------
 def preload_staff(staff_file):
@@ -258,15 +262,7 @@ def generate_output(events_file, staff_file, output_file):
             # fetch timeslots from Bookable Hours dropdown
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
-
-            # ---------- DEBUG PRINTS ----------
-            print("--------------------------------------------------")
-            print(f"Sheet: {sheet_name}")
-            print(f"Row: {r}, Activity: {activity}, Resort: {resort}")
-            print(f"Bookable Cell: {bookable_cell.coordinate}")
-            print(f"Dropdown Raw Data: {time_slots}")
-            print(f"Instructors: {instrs}")
-            print("--------------------------------------------------")
+            print(f"Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
 
             for slot in time_slots:
                 slot = slot.strip()
