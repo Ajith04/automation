@@ -1,4 +1,6 @@
 import re
+import zipfile
+import xml.etree.ElementTree as ET
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
 from datetime import datetime
@@ -11,21 +13,7 @@ HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
-
-MONTH_MAP = {
-    "january": 1, "jan": 1,
-    "february": 2, "feb": 2,
-    "march": 3, "mar": 3,
-    "april": 4, "apr": 4,
-    "may": 5,
-    "june": 6, "jun": 6,
-    "july": 7, "jul": 7,
-    "august": 8, "aug": 8,
-    "september": 9, "sep": 9, "sept": 9,
-    "october": 10, "oct": 10,
-    "november": 11, "nov": 11,
-    "december": 12, "dec": 12
-}
+NS = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 # ---------- HELPERS ----------
 def safe_str(v):
@@ -53,6 +41,14 @@ def parse_month_to_num(month_value):
     s = str(month_value).strip()
     if not s:
         return None
+    MONTH_MAP = {
+        "january": 1, "jan": 1, "february": 2, "feb": 2,
+        "march": 3, "mar": 3, "april": 4, "apr": 4,
+        "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+        "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+        "october": 10, "oct": 10, "november": 11, "nov": 11,
+        "december": 12, "dec": 12
+    }
     if s.isdigit() and 1 <= int(s) <= 12:
         return int(s)
     key = s.lower()
@@ -85,37 +81,63 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-def get_dropdown_values(ws, cell):
-    """Return all dropdown options for a cell, including cross-sheet ranges."""
-    values = []
-    for dv in ws.data_validations.dataValidation:
-        if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
-            formula = dv.formula1
-            if formula.startswith('"') and formula.endswith('"'):
-                # Inline list
-                items = formula.strip('"').split(",")
-                values.extend([x.strip() for x in items])
-            else:
-                # Remove '='
-                ref = formula.lstrip("=")
-                # Check for cross-sheet range: SheetName!A1:A10
-                if "!" in ref:
-                    sheet_name, rng = ref.split("!")
-                    sheet_name = sheet_name.strip("'")  # remove quotes if any
-                    ref_ws = ws.parent[sheet_name]
-                    for row in ref_ws[rng]:
-                        for c in row:
-                            if c.value:
-                                values.append(str(c.value).strip())
-                else:
-                    # Same-sheet range
-                    for row in ws[ref]:
-                        for c in row:
-                            if c.value:
-                                values.append(str(c.value).strip())
-    return list(dict.fromkeys(values))  # remove duplicates
+# ---------- RAW XML HELPERS ----------
+def get_data_validations(xlsx_file):
+    """Parse all data validation formulas from workbook XML."""
+    results = {}
+    with zipfile.ZipFile(xlsx_file, "r") as z:
+        for sheet_file in [f for f in z.namelist() if f.startswith("xl/worksheets/sheet")]:
+            xml_content = z.read(sheet_file)
+            root = ET.fromstring(xml_content)
+            dvs = root.findall(".//main:dataValidation", NS)
+            formulas = []
+            for dv in dvs:
+                formula = dv.find("main:formula1", NS)
+                if formula is not None:
+                    formulas.append(formula.text)  # e.g. "A,B,C" or "=Availability!B2:B20"
+            results[sheet_file] = formulas
+    return results
 
-# ---------- STAFF LOADER ----------
+def read_range_from_sheet(xlsx_file, sheet_name, cell_range):
+    """Read values from a given sheet + range (like B2:B20)"""
+    values = []
+    with zipfile.ZipFile(xlsx_file, "r") as z:
+        sheet_file = f"xl/worksheets/{sheet_name}.xml"
+        xml_content = z.read(sheet_file)
+        root = ET.fromstring(xml_content)
+        for c in root.findall(".//main:c", NS):
+            ref = c.attrib.get("r")  # e.g., "B2"
+            if not ref:
+                continue
+            match = re.match(r"([A-Z]+)(\d+)", ref)
+            if not match:
+                continue
+            col, row = match.groups()
+            row = int(row)
+            # crude check: you can expand logic for ranges
+            if ref in cell_range or (col + str(row)) in cell_range:
+                v = c.find("main:v", NS)
+                if v is not None:
+                    values.append(v.text)
+    return values
+
+def resolve_dropdown_values(xlsx_file, formula):
+    """Resolve dropdown values from inline or cross-sheet references."""
+    values = []
+    if not formula:
+        return values
+    if formula.startswith('"') and formula.endswith('"'):
+        # Inline list
+        values = [x.strip() for x in formula.strip('"').split(",")]
+    elif formula.startswith("="):
+        # Cross-sheet reference like =Availability!B2:B20
+        if "!" in formula:
+            sheet_name, rng = formula[1:].split("!")
+            sheet_name = sheet_name.strip("'")  # handle quotes
+            values = read_range_from_sheet(xlsx_file, sheet_name, rng)
+    return values
+
+# ---------- STAFF ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -155,6 +177,9 @@ def generate_output(events_file, staff_file, output_file):
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     event_color_cache = {}
+
+    # Collect all dropdowns from raw XML
+    dropdowns_by_sheet = get_data_validations(events_file)
 
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
@@ -198,7 +223,7 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            # find first non-empty day
+            # first non-empty day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -228,9 +253,11 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # fetch all timeslots from Bookable Hours dropdown
-            bookable_cell = ws_src.cell(r, bookable_col)
-            time_slots = get_dropdown_values(ws_src, bookable_cell)
+            # fetch Bookable Hours dropdown
+            dropdown_formulas = dropdowns_by_sheet.get(f"xl/worksheets/{sheet_name}.xml", [])
+            time_slots = []
+            for formula in dropdown_formulas:
+                time_slots.extend(resolve_dropdown_values(events_file, formula))
 
             for slot in time_slots:
                 slot = slot.strip()
@@ -246,7 +273,7 @@ def generate_output(events_file, staff_file, output_file):
                     continue
                 seen_events.add(key)
 
-                # main event row
+                # main row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
