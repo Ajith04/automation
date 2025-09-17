@@ -183,7 +183,6 @@ def generate_output(events_file, staff_file, output_file):
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     event_color_cache = {}
-    activity_resort_seen = {}  # track activities per resort for uniqueness
 
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
@@ -193,7 +192,7 @@ def generate_output(events_file, staff_file, output_file):
         add_headers(ws_out)
 
         # map headers
-        header_map = {safe_str(ws_src.cell(row=1, column=c).value).lower(): c
+        header_map = {safe_str(ws_src.cell(1, c).value).lower(): c
                       for c in range(1, ws_src.max_column + 1)}
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
@@ -208,6 +207,15 @@ def generate_output(events_file, staff_file, output_file):
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
+        # ---------- Pass 1: detect multi-resort activities ----------
+        activity_resorts = {}
+        for r in range(2, ws_src.max_row + 1):
+            act = safe_str(ws_src.cell(r, activity_col).value)
+            res = safe_str(ws_src.cell(r, resort_col).value) if resort_col else ""
+            if act:
+                activity_resorts.setdefault(act, set()).add(res)
+
+        # ---------- Pass 2: generate output ----------
         for r in range(2, ws_src.max_row + 1):
             activity = safe_str(ws_src.cell(r, activity_col).value)
             if not activity:
@@ -224,7 +232,7 @@ def generate_output(events_file, staff_file, output_file):
             # find first non-empty day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
-                c = ws_src.cell(r, column=col)
+                c = ws_src.cell(r, col)
                 try:
                     if c.value is not None and float(c.value) > 0:
                         first_day = int(ws_src.cell(1, col).value)
@@ -239,18 +247,14 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            # -------- Build Activity Name --------
-            base_activity = activity
-            # ensure uniqueness per resort
-            key = (activity, resort)
-            if key not in activity_resort_seen:
-                activity_resort_seen[key] = True
-            if len({k[1] for k in activity_resort_seen.keys() if k[0] == activity}) > 1:
-                event_name = f"{activity} - {resort}" if resort else activity
+            # -------- Build Event Name --------
+            resorts_for_activity = activity_resorts.get(activity, set())
+            if len(resorts_for_activity) > 1 and resort:
+                event_name = f"{activity} - {resort}"
             else:
                 event_name = activity
 
-            # -------- Get Instructors --------
+            # -------- Instructors --------
             instrs = instructors_map.get(sheet_name, {}).get(activity, [])
 
             # assign consistent fill color
@@ -271,15 +275,15 @@ def generate_output(events_file, staff_file, output_file):
                 else:
                     start_time, end_time = slot, ""
 
-                # main event row
+                # main event row (Resource & Config = raw activity)
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
-                    ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
+                    ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructor rows
+                # instructor rows (Resource = instructor, Config = raw activity)
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
-                        ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
+                        ws_out.cell(out_row, col_idx, value=val).fill = fill
                     out_row += 1
 
     wb_out.save(output_file)
