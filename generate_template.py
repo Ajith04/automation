@@ -13,12 +13,10 @@ HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
 
 MONTH_MAP = {
-    "january": 1, "jan": 1, "february": 2, "feb": 2,
-    "march": 3, "mar": 3, "april": 4, "apr": 4, "may": 5,
-    "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
     "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
-    "october": 10, "oct": 10, "november": 11, "nov": 11,
-    "december": 12, "dec": 12
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12
 }
 
 # ---------- HELPERS ----------
@@ -26,19 +24,27 @@ def safe_str(v):
     return "" if v is None else str(v).strip()
 
 def get_rgb(cell):
-    if not cell or not cell.fill or not cell.fill.start_color:
+    if cell is None:
         return None
-    if hasattr(cell.fill.start_color, "rgb") and cell.fill.start_color.rgb:
-        return str(cell.fill.start_color.rgb).upper()
+    fill = getattr(cell, "fill", None)
+    if not fill:
+        return None
+    color = getattr(fill, "start_color", None)
+    if color is None:
+        return None
+    if hasattr(color, "rgb") and color.rgb:
+        return str(color.rgb).upper()
     return None
 
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
-    if not month_value:
+    if month_value is None:
         return None
     s = str(month_value).strip()
+    if not s:
+        return None
     if s.isdigit() and 1 <= int(s) <= 12:
         return int(s)
     key = s.lower()
@@ -48,52 +54,15 @@ def parse_month_to_num(month_value):
         if name in key:
             return num
     m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
-    return int(m.group(1)) if m else None
+    if m:
+        return int(m.group(1))
+    return None
 
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
         c = ws.cell(row=1, column=col_idx, value=h)
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
-
-def clean_instructor_name(name):
-    if not name:
-        return None
-    return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
-
-def get_dropdown_values(ws, cell):
-    """Return all dropdown values for a cell, if it has data validation."""
-    dropdowns = []
-    for dv in ws.data_validations.dataValidation:
-        if cell.coordinate in dv.sqref:  # ✅ check if cell is part of validation range
-            if dv.type == "list" and dv.formula1:
-                if dv.formula1.startswith('"') and dv.formula1.endswith('"'):
-                    # inline list
-                    items = dv.formula1.strip('"').split(",")
-                    dropdowns.extend([i.strip() for i in items if i.strip()])
-                else:
-                    # reference to a named range or sheet range
-                    ref = dv.formula1.lstrip("=")
-                    if ref in ws.parent.defined_names:
-                        # named range
-                        dests = ws.parent.defined_names[ref].destinations
-                        for title, area in dests:
-                            ref_ws = ws.parent[title]
-                            for row in ref_ws[area]:
-                                for c in row:
-                                    if c.value:
-                                        dropdowns.append(str(c.value).strip())
-                    else:
-                        # direct sheet!range
-                        ref_ws = ws
-                        if "!" in ref:
-                            sheet_name, rng = ref.split("!")
-                            ref_ws = ws.parent[sheet_name.replace("'", "")]
-                        for row in ref_ws[rng]:
-                            for c in row:
-                                if c.value:
-                                    dropdowns.append(str(c.value).strip())
-    return dropdowns
 
 def get_light_fill():
     colors = [
@@ -103,7 +72,47 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- STAFF LOADER ----------
+def clean_instructor_name(name):
+    if not name:
+        return None
+    return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
+
+def get_dropdown_values(ws, cell):
+    """Fetch all dropdown options from a cell, including named ranges on other sheets."""
+    dropdowns = []
+    cell_ref = cell.coordinate
+    for dv in ws.data_validations.dataValidation:
+        if cell_ref in dv.sqref:
+            if dv.type == "list" and dv.formula1:
+                formula = dv.formula1.lstrip("=").strip()
+                # inline list
+                if formula.startswith('"') and formula.endswith('"'):
+                    items = formula.strip('"').split(",")
+                    dropdowns.extend([i.strip() for i in items])
+                else:
+                    # named range
+                    if formula in ws.parent.defined_names:
+                        defined = ws.parent.defined_names[formula]
+                        for title, rng in defined.destinations:
+                            ref_ws = ws.parent[title]
+                            for row in ref_ws[rng]:
+                                for c in row:
+                                    if c.value:
+                                        dropdowns.append(str(c.value).strip())
+                    else:
+                        # explicit range like Sheet2!A1:A10
+                        if "!" in formula:
+                            sheet_name, rng = formula.split("!")
+                            ref_ws = ws.parent[sheet_name]
+                        else:
+                            ref_ws = ws
+                            rng = formula
+                        for row in ref_ws[rng]:
+                            for c in row:
+                                if c.value:
+                                    dropdowns.append(str(c.value).strip())
+    return dropdowns
+
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -137,12 +146,9 @@ def preload_staff(staff_file):
     return result
 
 # ---------- MAIN ----------
-# ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
     instructors_map = preload_staff(staff_file)
-
-    # ❌ don't use data_only=True here, or validations vanish
-    wb_src = load_workbook(events_file)  
+    wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     event_color_cache = {}
@@ -162,13 +168,14 @@ def generate_output(events_file, staff_file, output_file):
         month_col = header_map.get("month")
         duration_col = header_map.get("activity duration")
 
-        if not (month_col and activity_col and bookable_col):
+        if not (activity_col and bookable_col and month_col):
             continue
 
         date_start_col = month_col + 1
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
+        # detect multi-resort activities
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -188,6 +195,7 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
+            # find first non-empty day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -205,6 +213,7 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
+            # Event name logic
             resorts_for_activity = activity_resorts.get(activity, set())
             if len(resorts_for_activity) > 1 and resort:
                 event_name = f"{activity} - {resort}"
@@ -217,23 +226,17 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # ✅ Get ALL dropdown values
+            # Fetch ALL dropdown values from Bookable Hours
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
-
-            # Debugging — check if dropdowns were actually found
-            if not time_slots:
-                print(f"⚠️ No dropdown found for {event_name} @ {sheet_name}, row {r}")
-                continue
-            else:
-                print(f"✅ Found {len(time_slots)} dropdowns for {event_name}: {time_slots}")
 
             for slot in time_slots:
                 slot = slot.strip()
                 if not slot:
                     continue
                 if "-" in slot:
-                    start_time, end_time = [p.strip() for p in slot.split("-", 1)]
+                    parts = [p.strip() for p in slot.split("-", 1)]
+                    start_time, end_time = parts if len(parts) == 2 else (parts[0], "")
                 else:
                     start_time, end_time = slot, ""
 
@@ -247,7 +250,7 @@ def generate_output(events_file, staff_file, output_file):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
-                # Instructor rows
+                # Instructors rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
