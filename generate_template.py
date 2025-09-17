@@ -12,7 +12,6 @@ HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="s
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
 
-# Month mapping
 MONTH_MAP = {
     "january": 1, "jan": 1,
     "february": 2, "feb": 2,
@@ -33,12 +32,17 @@ def safe_str(v):
     return "" if v is None else str(v).strip()
 
 def get_rgb(cell):
-    if cell is None or not hasattr(cell, "fill"):
+    if cell is None:
         return None
-    color = getattr(cell.fill, "start_color", None)
-    if color is None or not hasattr(color, "rgb"):
+    fill = getattr(cell, "fill", None)
+    if not fill:
         return None
-    return str(color.rgb).upper() if color.rgb else None
+    color = getattr(fill, "start_color", None)
+    if color is None:
+        return None
+    if hasattr(color, "rgb") and color.rgb:
+        return str(color.rgb).upper()
+    return None
 
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
@@ -78,46 +82,47 @@ def get_light_fill():
         "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
         "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
     ]
-    return PatternFill(start_color=random.choice(colors), end_color=random.choice(colors), fill_type="solid")
+    hexcolor = random.choice(colors)
+    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- DROPDOWN EXTRACTION ----------
 def get_dropdown_values(ws, cell):
-    """Fetch all dropdown options for a cell, even if it references another sheet or named range."""
+    """
+    Return all dropdown options for a cell, even if empty.
+    Handles inline lists, ranges, named ranges, and cross-sheet ranges.
+    """
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
-            f = dv.formula1
+            f = dv.formula1.strip()
             # Inline list
             if f.startswith('"') and f.endswith('"'):
-                dropdowns.extend([i.strip() for i in f.strip('"').split(",")])
+                dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
             else:
-                # Remove leading '='
+                # Remove leading =
                 ref = f.lstrip("=")
                 # Named range
                 if ref in ws.parent.defined_names:
-                    for title, area in ws.parent.defined_names[ref].destinations:
+                    dests = ws.parent.defined_names[ref].destinations
+                    for title, area in dests:
                         ref_ws = ws.parent[title]
                         for row in ref_ws[area]:
                             for c in row:
                                 if c.value:
                                     dropdowns.append(str(c.value).strip())
-                # Direct range (maybe sheet!)
-                elif "!" in ref:
-                    sheet_name, rng = ref.split("!")
-                    sheet_name = sheet_name.strip("'")  # handle 'Sheet Name' with spaces
-                    ref_ws = ws.parent[sheet_name]
+                # Direct range
+                else:
+                    if "!" in ref:
+                        sheet_name, rng = ref.split("!")
+                        sheet_name = sheet_name.strip("'")
+                        ref_ws = ws.parent[sheet_name]
+                    else:
+                        ref_ws = ws
+                        rng = ref
                     for row in ref_ws[rng]:
                         for c in row:
                             if c.value:
                                 dropdowns.append(str(c.value).strip())
-                # Same sheet range
-                else:
-                    for row in ws[ref]:
-                        for c in row:
-                            if c.value:
-                                dropdowns.append(str(c.value).strip())
-    # Remove duplicates
-    return list(dict.fromkeys(dropdowns))
+    return list(dict.fromkeys(dropdowns))  # remove duplicates
 
 # ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
@@ -167,7 +172,8 @@ def generate_output(events_file, staff_file, output_file):
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
-        header_map = {safe_str(ws_src.cell(1, c).value).lower(): c for c in range(1, ws_src.max_column + 1)}
+        header_map = {safe_str(ws_src.cell(1, c).value).lower(): c
+                      for c in range(1, ws_src.max_column + 1)}
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         bookable_col = header_map.get("bookable hours")
