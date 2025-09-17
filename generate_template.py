@@ -1,31 +1,23 @@
 import re
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.worksheet.datavalidation import DataValidation
 from datetime import datetime
 import random
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"    # ignore instructor if event cell red
+TARGET_RED = "FFC00000"
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
 
-# mapping month names/abbreviations to numbers
 MONTH_MAP = {
-    "january": 1, "jan": 1,
-    "february": 2, "feb": 2,
-    "march": 3, "mar": 3,
-    "april": 4, "apr": 4,
-    "may": 5,
-    "june": 6, "jun": 6,
-    "july": 7, "jul": 7,
-    "august": 8, "aug": 8,
-    "september": 9, "sep": 9, "sept": 9,
-    "october": 10, "oct": 10,
-    "november": 11, "nov": 11,
+    "january": 1, "jan": 1, "february": 2, "feb": 2,
+    "march": 3, "mar": 3, "april": 4, "apr": 4, "may": 5,
+    "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11,
     "december": 12, "dec": 12
 }
 
@@ -34,29 +26,19 @@ def safe_str(v):
     return "" if v is None else str(v).strip()
 
 def get_rgb(cell):
-    """Return the RGB string of a cell's fill color, or None."""
-    if cell is None:
+    if not cell or not cell.fill or not cell.fill.start_color:
         return None
-    fill = getattr(cell, "fill", None)
-    if not fill:
-        return None
-    color = getattr(fill, "start_color", None)
-    if color is None:
-        return None
-    if hasattr(color, "rgb") and color.rgb:
-        return str(color.rgb).upper()
+    if hasattr(cell.fill.start_color, "rgb") and cell.fill.start_color.rgb:
+        return str(cell.fill.start_color.rgb).upper()
     return None
 
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
-    """Convert month string/number to integer 1-12."""
-    if month_value is None:
+    if not month_value:
         return None
     s = str(month_value).strip()
-    if not s:
-        return None
     if s.isdigit() and 1 <= int(s) <= 12:
         return int(s)
     key = s.lower()
@@ -66,9 +48,7 @@ def parse_month_to_num(month_value):
         if name in key:
             return num
     m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
-    if m:
-        return int(m.group(1))
-    return None
+    return int(m.group(1)) if m else None
 
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
@@ -77,23 +57,25 @@ def add_headers(ws):
         c.fill = HEADER_FILL
 
 def clean_instructor_name(name):
-    """Remove brackets content."""
     if not name:
         return None
     return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
 
 def get_dropdown_values(ws, cell):
-    """Extract dropdown options from a cell with data validation."""
+    """Return all dropdown values for a cell, if it has data validation."""
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
-        if cell.coordinate in dv.cells:
+        if cell.coordinate in dv.sqref:  # ✅ check if cell is part of validation range
             if dv.type == "list" and dv.formula1:
                 if dv.formula1.startswith('"') and dv.formula1.endswith('"'):
+                    # inline list
                     items = dv.formula1.strip('"').split(",")
-                    dropdowns.extend([i.strip() for i in items])
+                    dropdowns.extend([i.strip() for i in items if i.strip()])
                 else:
+                    # reference to a named range or sheet range
                     ref = dv.formula1.lstrip("=")
                     if ref in ws.parent.defined_names:
+                        # named range
                         dests = ws.parent.defined_names[ref].destinations
                         for title, area in dests:
                             ref_ws = ws.parent[title]
@@ -102,10 +84,11 @@ def get_dropdown_values(ws, cell):
                                     if c.value:
                                         dropdowns.append(str(c.value).strip())
                     else:
+                        # direct sheet!range
                         ref_ws = ws
                         if "!" in ref:
                             sheet_name, rng = ref.split("!")
-                            ref_ws = ws.parent[sheet_name]
+                            ref_ws = ws.parent[sheet_name.replace("'", "")]
                         for row in ref_ws[rng]:
                             for c in row:
                                 if c.value:
@@ -113,7 +96,6 @@ def get_dropdown_values(ws, cell):
     return dropdowns
 
 def get_light_fill():
-    """Return a random light color PatternFill."""
     colors = [
         "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
         "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
@@ -184,7 +166,7 @@ def generate_output(events_file, staff_file, output_file):
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
-        # detect multi-resort activities
+        # map activity → resort set
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -204,7 +186,7 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            # find first non-empty day
+            # detect first valid date
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -234,7 +216,7 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # fetch ALL dropdown values from Bookable Hours
+            # ✅ take dropdown values from Bookable Hours column
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
 
@@ -253,14 +235,18 @@ def generate_output(events_file, staff_file, output_file):
                     continue
                 seen_events.add(key)
 
-                # event row
-                for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
+                # main event row
+                for col_idx, val in enumerate(
+                    [event_name, activity, activity, date_str, start_time, end_time], start=1
+                ):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructors
+                # instructor rows
                 for instr in instrs:
-                    for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
+                    for col_idx, val in enumerate(
+                        [event_name, instr, activity, date_str, start_time, end_time], start=1
+                    ):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
                     out_row += 1
 
