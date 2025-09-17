@@ -3,7 +3,6 @@ import random
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import range_boundaries
-from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
@@ -11,7 +10,7 @@ TARGET_RED = "FFC00000"
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
-YEAR_FOR_OUTPUT = 2025  # you can later replace with current year dynamically
+YEAR_FOR_OUTPUT = 2025  # you can replace with current year if needed
 
 # ---------- HELPERS ----------
 def safe_str(v):
@@ -86,35 +85,45 @@ def get_light_fill():
 def cell_in_dv(cell, dv_range):
     """Check if a cell is inside a DV range (CellRange object or string)."""
     if not isinstance(dv_range, str):
-        dv_range = str(dv_range)  # convert CellRange to string
+        dv_range = str(dv_range)
     min_col, min_row, max_col, max_row = range_boundaries(dv_range)
     return min_col <= cell.column <= max_col and min_row <= cell.row <= max_row
 
 def get_dropdown_values(ws, cell):
-    """Return dropdown values for a cell (inline list or referenced range)."""
+    """Return dropdown options for a cell, including cross-sheet references and named ranges."""
     dropdowns = []
+
     for dv in ws.data_validations.dataValidation:
         if dv.type != "list":
             continue
-        for rng in dv.ranges.ranges:  # iterate all ranges
-            if cell_in_dv(cell, rng):
-                f = dv.formula1
-                if f.startswith('"') and f.endswith('"'):
-                    dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
+        for dv_range in dv.ranges.ranges:
+            if cell_in_dv(cell, dv_range):
+                formula = dv.formula1
+                if not formula:
+                    continue
+                formula = formula.strip()
+                # Inline list
+                if formula.startswith('"') and formula.endswith('"'):
+                    dropdowns.extend([x.strip() for x in formula.strip('"').split(",")])
                 else:
-                    ref = f.lstrip("=")
+                    # Reference to range
+                    ref = formula.lstrip("=")
                     if "!" in ref:
-                        sheet_name, rng_ref = ref.split("!")
+                        sheet_name, rng = ref.split("!")
                         sheet_name = sheet_name.strip("'")
                         ref_ws = ws.parent[sheet_name]
                     else:
-                        ref_ws, rng_ref = ws, ref
-                    min_col, min_row, max_col, max_row = range_boundaries(rng_ref)
-                    for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
-                                                min_col=min_col, max_col=max_col):
-                        for c in row:
-                            if c.value:
-                                dropdowns.append(str(c.value).strip())
+                        ref_ws, rng = ws, ref
+                    try:
+                        min_col, min_row, max_col, max_row = range_boundaries(rng)
+                        for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
+                                                    min_col=min_col, max_col=max_col):
+                            for c in row:
+                                if c.value:
+                                    dropdowns.append(str(c.value).strip())
+                    except:
+                        pass
+
     return list(dict.fromkeys(dropdowns))
 
 def get_slot_start_end(ws, cell):
