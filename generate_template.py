@@ -12,7 +12,6 @@ HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="s
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
 
-# mapping month names/abbreviations to numbers
 MONTH_MAP = {
     "january": 1, "jan": 1,
     "february": 2, "feb": 2,
@@ -87,38 +86,37 @@ def get_light_fill():
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
 def get_dropdown_values(ws, cell):
-    """Return all dropdown options for a cell, even if empty. Handles inline, ranges, named ranges."""
+    """Return all dropdown options for a cell, including inline lists, ranges, named ranges."""
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
-        if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
-            f = dv.formula1
-            # Inline list
-            if f.startswith('"') and f.endswith('"'):
-                items = f.strip('"').split(",")
-                dropdowns.extend([i.strip() for i in items])
-            else:
-                ref = f.lstrip("=")
-                # Named range
-                if ref in ws.parent.defined_names:
-                    dests = ws.parent.defined_names[ref].destinations
-                    for title, area in dests:
-                        ref_ws = ws.parent[title]
-                        for row in ref_ws[area]:
-                            for c in row:
-                                if c.value:
-                                    dropdowns.append(str(c.value).strip())
-                # Direct cell range (maybe sheet name)
+        if cell.coordinate not in dv.cells or dv.type != "list" or not dv.formula1:
+            continue
+        f = dv.formula1
+        if f.startswith('"') and f.endswith('"'):  # inline list
+            items = f.strip('"').split(",")
+            dropdowns.extend([i.strip() for i in items if i.strip()])
+        else:  # range or named range
+            ref = f.lstrip("=")
+            # Named range
+            if ref in ws.parent.defined_names:
+                dests = ws.parent.defined_names[ref].destinations
+                for title, area in dests:
+                    ref_ws = ws.parent[title]
+                    for row in ref_ws[area]:
+                        for c in row:
+                            if c.value and '-' in str(c.value):
+                                dropdowns.append(str(c.value).strip())
+            else:  # direct range
+                if "!" in ref:
+                    sheet_name, rng = ref.split("!")
+                    ref_ws = ws.parent[sheet_name]
                 else:
                     ref_ws = ws
-                    if "!" in ref:
-                        sheet_name, rng = ref.split("!")
-                        ref_ws = ws.parent[sheet_name]
-                    else:
-                        rng = ref
-                    for row in ref_ws[rng]:
-                        for c in row:
-                            if c.value:
-                                dropdowns.append(str(c.value).strip())
+                    rng = ref
+                for row in ref_ws[rng]:
+                    for c in row:
+                        if c.value and '-' in str(c.value):
+                            dropdowns.append(str(c.value).strip())
     return list(dict.fromkeys(dropdowns))  # remove duplicates
 
 def preload_staff(staff_file):
@@ -183,7 +181,7 @@ def generate_output(events_file, staff_file, output_file):
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
-        # detect multi-resort activities
+        # multi-resort activities
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -203,7 +201,7 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            # find first non-empty day
+            # first non-empty day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -221,8 +219,7 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            resorts_for_activity = activity_resorts.get(activity, set())
-            if len(resorts_for_activity) > 1 and resort:
+            if len(activity_resorts.get(activity, [])) > 1 and resort:
                 event_name = f"{activity} - {resort}"
             else:
                 event_name = activity
@@ -233,30 +230,23 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # fetch all timeslots from Bookable Hours dropdown
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
 
             for slot in time_slots:
-                slot = slot.strip()
-                if not slot:
-                    continue
-                if "-" in slot:
-                    start_time, end_time = [p.strip() for p in slot.split("-", 1)]
-                else:
-                    start_time, end_time = slot, ""
+                start_time, end_time = (slot.split("-", 1) + [""])[:2]
+                start_time = start_time.strip()
+                end_time = end_time.strip()
 
                 key = (event_name, resort, activity, date_str, start_time, end_time)
                 if key in seen_events:
                     continue
                 seen_events.add(key)
 
-                # main event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
