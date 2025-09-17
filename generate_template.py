@@ -2,8 +2,7 @@ import re
 import random
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import column_index_from_string
-import streamlit as st  # For debugging output in Streamlit
+from openpyxl.utils import range_boundaries
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
@@ -34,6 +33,7 @@ def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
+    """Convert month names or numbers into integer 1–12."""
     if month_value is None:
         return None
     s = str(month_value).strip()
@@ -56,7 +56,12 @@ def parse_month_to_num(month_value):
         "december": 12, "dec": 12
     }
     key = s.lower()
-    return MONTH_MAP.get(key)
+    if key in MONTH_MAP:
+        return MONTH_MAP[key]
+    for name, num in MONTH_MAP.items():
+        if name in key:
+            return num
+    return None
 
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
@@ -83,24 +88,26 @@ def get_dropdown_values(ws, cell):
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
             f = dv.formula1
-            st.write(f"Processing dropdown formula: {f}")  # Streamlit debug
             if f.startswith('"') and f.endswith('"'):
                 dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
             else:
                 ref = f.lstrip("=")
                 if "!" in ref:
+                    # Split sheet and range
                     sheet_name, rng = ref.split("!")
                     sheet_name = sheet_name.strip("'")
                     ref_ws = ws.parent[sheet_name]
                 else:
                     ref_ws, rng = ws, ref
-                st.write(f"Fetching dropdown values from {sheet_name if 'sheet_name' in locals() else ws.title} range {rng}")
-                for row in ref_ws[rng]:
+
+                min_col, min_row, max_col, max_row = range_boundaries(rng)
+                for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
+                                            min_col=min_col, max_col=max_col):
                     for c in row:
                         if c.value:
                             dropdowns.append(str(c.value).strip())
-    st.write(f"Dropdown values found: {dropdowns}")
-    return list(dict.fromkeys(dropdowns))  # remove duplicates
+    print(f"Dropdown values found for {cell.coordinate}: {dropdowns}")
+    return list(dict.fromkeys(dropdowns))
 
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
@@ -136,17 +143,14 @@ def preload_staff(staff_file):
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
-    st.write("Loading staff file...")
     instructors_map = preload_staff(staff_file)
-    st.write("Staff mapping loaded:", instructors_map)
-    
+    print("✅ Staff preloaded")
     wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     event_color_cache = {}
 
     for sheet_name in wb_src.sheetnames:
-        st.write(f"Processing sheet: {sheet_name}")
         if sheet_name.upper() not in TARGET_SHEETS:
             continue
         ws_src = wb_src[sheet_name]
@@ -161,10 +165,8 @@ def generate_output(events_file, staff_file, output_file):
         month_col = header_map.get("month")
         duration_col = header_map.get("activity duration")
 
-        st.write(f"Header mapping: {header_map}")
-
         if not (month_col and activity_col and bookable_col):
-            st.write(f"Skipping sheet {sheet_name} because some columns are missing")
+            print(f"⚠ Skipping sheet {sheet_name}, missing required columns")
             continue
 
         date_start_col = month_col + 1
@@ -208,7 +210,11 @@ def generate_output(events_file, staff_file, output_file):
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
             resorts_for_activity = activity_resorts.get(activity, set())
-            event_name = f"{activity} - {resort}" if len(resorts_for_activity) > 1 and resort else activity
+            if len(resorts_for_activity) > 1 and resort:
+                event_name = f"{activity} - {resort}"
+            else:
+                event_name = activity
+
             instrs = instructors_map.get(sheet_name, {}).get(activity, [])
 
             if event_name not in event_color_cache:
@@ -218,7 +224,7 @@ def generate_output(events_file, staff_file, output_file):
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
 
-            st.write(f"Activity: {activity}, Time slots: {time_slots}, Instructors: {instrs}")
+            print(f"Activity: {activity}, Time slots: {time_slots}, Instructors: {instrs}")
 
             for slot in time_slots:
                 slot = slot.strip()
@@ -244,4 +250,4 @@ def generate_output(events_file, staff_file, output_file):
                     out_row += 1
 
     wb_out.save(output_file)
-    st.write(f"✅ Output saved to {output_file}")
+    print(f"✅ Output saved to {output_file}")
