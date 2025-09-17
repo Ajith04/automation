@@ -2,10 +2,11 @@ import re
 import random
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import range_boundaries
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"    # ignore instructor if event cell red
+TARGET_RED = "FFC00000"    # ignore red cells
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
@@ -82,47 +83,36 @@ def get_light_fill():
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
 def get_dropdown_values(ws, cell):
-    """Return dropdown options for a cell, supporting inline, same-sheet, cross-sheet, and named ranges."""
+    """Return dropdown options for a specific cell (inline, same-sheet, cross-sheet)."""
     dropdowns = []
-
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
             f = dv.formula1
-
-            # Inline list: "Option1,Option2"
+            # Inline list
             if f.startswith('"') and f.endswith('"'):
                 dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
-                continue
-
-            # Otherwise, it's a range or named range
-            ref = f.lstrip("=")
-
-            # Named range
-            if ref in ws.parent.defined_names:
-                dests = ws.parent.defined_names[ref].destinations  # list of (sheet_name, range)
-                for sheet_name, rng in dests:
+            else:
+                ref = f.lstrip("=")
+                if "!" in ref:
+                    # Split sheet and range
+                    sheet_name, rng = ref.split("!")
+                    sheet_name = sheet_name.strip("'")
                     ref_ws = ws.parent[sheet_name]
-                    for row in ref_ws[rng]:
+                else:
+                    ref_ws, rng = ws, ref
+
+                try:
+                    min_col, min_row, max_col, max_row = range_boundaries(rng)
+                    for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
+                                                min_col=min_col, max_col=max_col):
                         for c in row:
                             if c.value:
                                 dropdowns.append(str(c.value).strip())
-                continue
-
-            # Cross-sheet reference: SheetName!A1:A10
-            if "!" in ref:
-                sheet_name, rng = ref.split("!")
-                sheet_name = sheet_name.strip("'")
-                ref_ws = ws.parent[sheet_name]
-            else:
-                ref_ws, rng = ws, ref
-
-            # Fetch values from the range
-            for row in ref_ws[rng]:
-                for c in row:
-                    if c.value:
-                        dropdowns.append(str(c.value).strip())
-
-    return list(dict.fromkeys(dropdowns))  # remove duplicates
+                except Exception as e:
+                    print(f"⚠ Failed to read range {rng} for cell {cell.coordinate}: {e}")
+    dropdowns = list(dict.fromkeys(dropdowns))
+    print(f"Dropdown values for {cell.coordinate}: {dropdowns}")
+    return dropdowns
 
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
@@ -158,9 +148,10 @@ def preload_staff(staff_file):
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
+    print("⏳ Loading staff...")
     instructors_map = preload_staff(staff_file)
-    print("✅ Loaded staff info")
-    
+    print("✅ Staff loaded.")
+
     wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
@@ -169,6 +160,7 @@ def generate_output(events_file, staff_file, output_file):
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
             continue
+        print(f"📄 Processing sheet: {sheet_name}")
         ws_src = wb_src[sheet_name]
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
@@ -182,7 +174,7 @@ def generate_output(events_file, staff_file, output_file):
         duration_col = header_map.get("activity duration")
 
         if not (month_col and activity_col and bookable_col):
-            print(f"⚠ Skipping sheet {sheet_name}, missing essential columns")
+            print(f"⚠ Missing essential columns in {sheet_name}, skipping...")
             continue
 
         date_start_col = month_col + 1
@@ -220,10 +212,12 @@ def generate_output(events_file, staff_file, output_file):
                 except:
                     continue
             if not first_day:
+                print(f"⚠ No valid day for activity {activity}, row {r}")
                 continue
 
             month_num = parse_month_to_num(month_val)
             if not month_num:
+                print(f"⚠ Invalid month '{month_val}' for activity {activity}, row {r}")
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
@@ -234,14 +228,18 @@ def generate_output(events_file, staff_file, output_file):
                 event_name = activity
 
             instrs = instructors_map.get(sheet_name, {}).get(activity, [])
+            print(f"Activity: {activity}, Time slots: fetching dropdowns, Instructors: {instrs}")
+
             if event_name not in event_color_cache:
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # fetch timeslots from Bookable Hours dropdown
+            # fetch timeslots from Bookable Hours dropdown (per cell!)
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
-            print(f"Activity: {activity}, Time slots: {time_slots}, Instructors: {instrs}")
+
+            if not time_slots:
+                print(f"⚠ No dropdown values found for activity {activity}, row {r}")
 
             for slot in time_slots:
                 slot = slot.strip()
