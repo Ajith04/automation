@@ -6,11 +6,11 @@ from openpyxl.utils import range_boundaries
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"
+TARGET_RED = "FFC00000"    # ignore instructor if event cell red
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
-YEAR_FOR_OUTPUT = 2025  # you can replace with current year if needed
+YEAR_FOR_OUTPUT = 2025
 
 # ---------- HELPERS ----------
 def safe_str(v):
@@ -33,6 +33,7 @@ def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
+    """Convert month names or numbers into integer 1–12."""
     if month_value is None:
         return None
     s = str(month_value).strip()
@@ -81,68 +82,33 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- DROPDOWN HANDLING ----------
-def cell_in_dv(cell, dv_range):
-    """Check if a cell is inside a DV range (CellRange object or string)."""
-    if not isinstance(dv_range, str):
-        dv_range = str(dv_range)
-    min_col, min_row, max_col, max_row = range_boundaries(dv_range)
-    return min_col <= cell.column <= max_col and min_row <= cell.row <= max_row
-
 def get_dropdown_values(ws, cell):
-    """Return dropdown options for a cell, including cross-sheet references and named ranges."""
+    """Return dropdown options including cross-sheet references."""
     dropdowns = []
-
     for dv in ws.data_validations.dataValidation:
-        if dv.type != "list":
-            continue
-        for dv_range in dv.ranges.ranges:
-            if cell_in_dv(cell, dv_range):
-                formula = dv.formula1
-                if not formula:
-                    continue
-                formula = formula.strip()
-                # Inline list
-                if formula.startswith('"') and formula.endswith('"'):
-                    dropdowns.extend([x.strip() for x in formula.strip('"').split(",")])
+        if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
+            f = dv.formula1
+            if f.startswith('"') and f.endswith('"'):
+                dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
+            else:
+                ref = f.lstrip("=")
+                if "!" in ref:
+                    # Split sheet and range
+                    sheet_name, rng = ref.split("!")
+                    sheet_name = sheet_name.strip("'")
+                    ref_ws = ws.parent[sheet_name]
                 else:
-                    # Reference to range
-                    ref = formula.lstrip("=")
-                    if "!" in ref:
-                        sheet_name, rng = ref.split("!")
-                        sheet_name = sheet_name.strip("'")
-                        ref_ws = ws.parent[sheet_name]
-                    else:
-                        ref_ws, rng = ws, ref
-                    try:
-                        min_col, min_row, max_col, max_row = range_boundaries(rng)
-                        for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
-                                                    min_col=min_col, max_col=max_col):
-                            for c in row:
-                                if c.value:
-                                    dropdowns.append(str(c.value).strip())
-                    except:
-                        pass
+                    ref_ws, rng = ws, ref
 
+                min_col, min_row, max_col, max_row = range_boundaries(rng)
+                for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
+                                            min_col=min_col, max_col=max_col):
+                    for c in row:
+                        if c.value:
+                            dropdowns.append(str(c.value).strip())
+    print(f"Dropdown values found for {cell.coordinate}: {dropdowns}")
     return list(dict.fromkeys(dropdowns))
 
-def get_slot_start_end(ws, cell):
-    slots = get_dropdown_values(ws, cell)
-    start_end_list = []
-    for slot in slots:
-        slot = slot.replace("–", "-").strip()
-        if not slot:
-            continue
-        if " - " in slot:
-            start, end = [s.strip() for s in slot.split(" - ", 1)]
-        elif "-" in slot:
-            start, end = [s.strip() for s in slot.split("-", 1)]
-        else:
-            start, end = slot, ""
-        start_end_list.append((start, end))
-    return start_end_list
-
-# ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -255,13 +221,20 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # --- Populate Start/End from dropdown ---
             bookable_cell = ws_src.cell(r, bookable_col)
-            slot_times = get_slot_start_end(ws_src, bookable_cell)
-            if not slot_times:
-                slot_times = [("", "")]
+            time_slots = get_dropdown_values(ws_src, bookable_cell)
 
-            for start_time, end_time in slot_times:
+            print(f"Activity: {activity}, Time slots: {time_slots}, Instructors: {instrs}")
+
+            for slot in time_slots:
+                slot = slot.strip()
+                if not slot:
+                    continue
+                if "-" in slot:
+                    start_time, end_time = [p.strip() for p in slot.split("-", 1)]
+                else:
+                    start_time, end_time = slot, ""
+
                 key = (event_name, resort, activity, date_str, start_time, end_time)
                 if key in seen_events:
                     continue
