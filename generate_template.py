@@ -1,6 +1,7 @@
 import re
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
 from datetime import datetime
 import random
 
@@ -53,36 +54,20 @@ def parse_month_to_num(month_value):
     """Convert month string/number to integer 1-12."""
     if month_value is None:
         return None
-
     s = str(month_value).strip()
     if not s:
         return None
-
-    # Case: numeric string or int
     if s.isdigit() and 1 <= int(s) <= 12:
         return int(s)
-
     key = s.lower()
-
-    # ---- Step 1: exact dictionary match ----
     if key in MONTH_MAP:
         return MONTH_MAP[key]
-
-    # ---- Step 2: exact equality with known month keys ----
-    for name, num in MONTH_MAP.items():
-        if key == name:
-            return num
-
-    # ---- Step 3: substring match (e.g., "September 2025") ----
     for name, num in MONTH_MAP.items():
         if name in key:
             return num
-
-    # ---- Step 4: numeric extraction from text ----
     m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
     if m:
         return int(m.group(1))
-
     return None
 
 def add_headers(ws):
@@ -97,9 +82,47 @@ def clean_instructor_name(name):
         return None
     return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
 
+def get_dropdown_values(ws, cell):
+    """Extract dropdown options from a cell with data validation."""
+    dropdowns = []
+    for dv in ws.data_validations.dataValidation:
+        if cell.coordinate in dv.cells:
+            if dv.type == "list" and dv.formula1:
+                if dv.formula1.startswith('"') and dv.formula1.endswith('"'):
+                    items = dv.formula1.strip('"').split(",")
+                    dropdowns.extend([i.strip() for i in items])
+                else:
+                    ref = dv.formula1.lstrip("=")
+                    if ref in ws.parent.defined_names:
+                        dests = ws.parent.defined_names[ref].destinations
+                        for title, area in dests:
+                            ref_ws = ws.parent[title]
+                            for row in ref_ws[area]:
+                                for c in row:
+                                    if c.value:
+                                        dropdowns.append(str(c.value).strip())
+                    else:
+                        ref_ws = ws
+                        if "!" in ref:
+                            sheet_name, rng = ref.split("!")
+                            ref_ws = ws.parent[sheet_name]
+                        for row in ref_ws[rng]:
+                            for c in row:
+                                if c.value:
+                                    dropdowns.append(str(c.value).strip())
+    return dropdowns
+
+def get_light_fill():
+    """Return a random light color PatternFill."""
+    colors = [
+        "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
+        "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
+    ]
+    hexcolor = random.choice(colors)
+    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
+
 # ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
-    """Load staff workbook once and build {sheet -> {activity -> [instrs]}}"""
     wb = load_workbook(staff_file, data_only=True)
     result = {}
     for sheet in TARGET_SHEETS:
@@ -114,67 +137,22 @@ def preload_staff(staff_file):
         instr_start_col = pri_idx + 1
         sheet_map = {}
         for col in range(instr_start_col, ws.max_column + 1):
-            instr_name = clean_instructor_name(safe_str(ws.cell(row=1, column=col).value))
+            instr_name = clean_instructor_name(safe_str(ws.cell(1, col).value))
             if not instr_name:
                 continue
             r = 2
             while r <= ws.max_row:
-                val_cell = ws.cell(row=r, column=col)
+                val_cell = ws.cell(r, col)
                 val = safe_str(val_cell.value)
                 if not val:
-                    break  # stop at first blank
+                    break
                 if is_red(val_cell):
                     r += 1
-                    continue  # skip events with red cell
+                    continue
                 sheet_map.setdefault(val, []).append(instr_name)
                 r += 1
         result[sheet] = sheet_map
     return result
-
-def build_event_names(sheet_name, resort, activity, product, age_group, guest_price, staff_price):
-    """Build one or more event names according to sheet rules."""
-    out = []
-    act = safe_str(activity)
-    res = safe_str(resort)
-    prod = safe_str(product)
-    ag = safe_str(age_group)
-    if not act:
-        return out
-    sheet_name = sheet_name.upper()
-    if sheet_name == "AKUN":
-        if ag == "13+":
-            if guest_price:
-                out.append(f"{act} - {res}")
-            if staff_price:
-                out.append(f"{act} - {res} - Staff")
-        elif re.search(r"8\s*-\s*12", ag) or "8-12" in ag or "years" in ag.lower():
-            if guest_price:
-                out.append(f"{act} - {res} - Child")
-            if staff_price:
-                out.append(f"{act} - {res} - RSG Staff - Child")
-        else:
-            if guest_price:
-                out.append(f"{act} - {res}")
-            if staff_price:
-                out.append(f"{act} - {res} - Staff")
-    elif sheet_name in ("WAMA", "GALAXEA"):
-        base = f"{act} - {res}" if res else act
-        if prod:
-            base = f"{base} - {prod}"
-        if guest_price:
-            out.append(base)
-        if staff_price:
-            out.append(base + " - Staff")
-    return out
-
-def get_light_fill():
-    """Return a random light color PatternFill."""
-    colors = [
-        "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
-        "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
-    ]
-    hexcolor = random.choice(colors)
-    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
@@ -191,23 +169,22 @@ def generate_output(events_file, staff_file, output_file):
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
-        # map headers
         header_map = {safe_str(ws_src.cell(1, c).value).lower(): c
                       for c in range(1, ws_src.max_column + 1)}
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
-        timing_col = header_map.get("timing availability")
+        bookable_col = header_map.get("bookable hours")
         month_col = header_map.get("month")
         duration_col = header_map.get("activity duration")
 
-        if not (month_col and activity_col):
+        if not (month_col and activity_col and bookable_col):
             continue
 
         date_start_col = month_col + 1
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
-        # ---------- Pass 1: detect multi-resort activities ----------
+        # detect multi-resort activities
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -215,18 +192,15 @@ def generate_output(events_file, staff_file, output_file):
             if act:
                 activity_resorts.setdefault(act, set()).add(res)
 
-        # ---------- Pass 2: generate output ----------
-        seen_events = set()  # prevent duplicates (activity+resort+date+time)
+        seen_events = set()
         for r in range(2, ws_src.max_row + 1):
             activity = safe_str(ws_src.cell(r, activity_col).value)
             if not activity:
                 continue
             resort = safe_str(ws_src.cell(r, resort_col).value) if resort_col else ""
             duration = safe_str(ws_src.cell(r, duration_col).value) if duration_col else ""
-            timing = safe_str(ws_src.cell(r, timing_col).value) if timing_col else ""
             month_val = ws_src.cell(r, month_col).value
 
-            # skip multi-day Galaxea
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
@@ -248,23 +222,21 @@ def generate_output(events_file, staff_file, output_file):
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            # -------- Build Event Name --------
             resorts_for_activity = activity_resorts.get(activity, set())
             if len(resorts_for_activity) > 1 and resort:
                 event_name = f"{activity} - {resort}"
             else:
                 event_name = activity
 
-            # -------- Instructors --------
             instrs = instructors_map.get(sheet_name, {}).get(activity, [])
 
-            # assign consistent fill color
             if event_name not in event_color_cache:
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # -------- Handle Timing Availability --------
-            time_slots = [timing] if "|" not in timing else timing.split("|")
+            # fetch ALL dropdown values from Bookable Hours
+            bookable_cell = ws_src.cell(r, bookable_col)
+            time_slots = get_dropdown_values(ws_src, bookable_cell)
 
             for slot in time_slots:
                 slot = slot.strip()
@@ -278,15 +250,15 @@ def generate_output(events_file, staff_file, output_file):
 
                 key = (event_name, resort, activity, date_str, start_time, end_time)
                 if key in seen_events:
-                    continue  # skip duplicate
+                    continue
                 seen_events.add(key)
 
-                # main event row
+                # event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructor rows
+                # instructors
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
