@@ -10,9 +10,9 @@ TARGET_RED = "FFC00000"    # ignore instructor if event cell red
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
-YEAR_FOR_OUTPUT = datetime.now().year  # current year dynamically
+YEAR_FOR_OUTPUT = 2025
 
-# Month mapping
+# mapping month names/abbreviations to numbers
 MONTH_MAP = {
     "january": 1, "jan": 1,
     "february": 2, "feb": 2,
@@ -86,37 +86,45 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-def get_dropdown_values(ws, cell):
+def get_dropdown_values(ws, cell, wb):
+    """
+    Return all dropdown options for a cell, even if empty.
+    Handles:
+      - Inline list
+      - Named range
+      - Direct cell range on another sheet (here specifically "Availability")
+    """
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
             f = dv.formula1
+            # Inline list
             if f.startswith('"') and f.endswith('"'):
-                dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
+                items = f.strip('"').split(",")
+                dropdowns.extend([i.strip() for i in items])
             else:
                 ref = f.lstrip("=")
-                if ref in ws.parent.defined_names:
-                    dests = ws.parent.defined_names[ref].destinations
-                    for title, area in dests:
-                        ref_ws = ws.parent[title]
-                        for row in ref_ws[area]:
+                # Check if cross-sheet range
+                if "!" in ref:
+                    sheet_name, rng = ref.split("!")
+                    if sheet_name.strip('"') == "Availability":
+                        ref_ws = wb["Availability"]
+                        for row in ref_ws[rng]:
                             for c in row:
                                 if c.value:
                                     dropdowns.append(str(c.value).strip())
+                # Named range or same sheet range
                 else:
-                    if "!" in ref:
-                        sheet_name, rng = ref.split("!")
-                        ref_ws = ws.parent[sheet_name]
-                    else:
+                    try:
                         ref_ws = ws
-                        rng = ref
-                    for row in ref_ws[rng]:
-                        for c in row:
-                            if c.value:
-                                dropdowns.append(str(c.value).strip())
-    return list(dict.fromkeys(dropdowns))
+                        for row in ref_ws[ref]:
+                            for c in row:
+                                if c.value:
+                                    dropdowns.append(str(c.value).strip())
+                    except:
+                        continue
+    return list(dict.fromkeys(dropdowns))  # remove duplicates
 
-# ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -179,6 +187,7 @@ def generate_output(events_file, staff_file, output_file):
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
+        # detect multi-resort activities
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -198,6 +207,7 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
+            # find first non-empty day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -227,8 +237,9 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
+            # fetch all timeslots from Bookable Hours dropdown (cross-sheet)
             bookable_cell = ws_src.cell(r, bookable_col)
-            time_slots = get_dropdown_values(ws_src, bookable_cell)
+            time_slots = get_dropdown_values(ws_src, bookable_cell, wb_src)
 
             for slot in time_slots:
                 slot = slot.strip()
@@ -244,10 +255,12 @@ def generate_output(events_file, staff_file, output_file):
                     continue
                 seen_events.add(key)
 
+                # main event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
+                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
