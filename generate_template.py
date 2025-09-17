@@ -137,9 +137,12 @@ def preload_staff(staff_file):
     return result
 
 # ---------- MAIN ----------
+# ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
     instructors_map = preload_staff(staff_file)
-    wb_src = load_workbook(events_file, data_only=True)
+
+    # ❌ don't use data_only=True here, or validations vanish
+    wb_src = load_workbook(events_file)  
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     event_color_cache = {}
@@ -166,7 +169,6 @@ def generate_output(events_file, staff_file, output_file):
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
-        # map activity → resort set
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -186,7 +188,6 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            # detect first valid date
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -216,17 +217,23 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # ✅ take dropdown values from Bookable Hours column
+            # ✅ Get ALL dropdown values
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
+
+            # Debugging — check if dropdowns were actually found
+            if not time_slots:
+                print(f"⚠️ No dropdown found for {event_name} @ {sheet_name}, row {r}")
+                continue
+            else:
+                print(f"✅ Found {len(time_slots)} dropdowns for {event_name}: {time_slots}")
 
             for slot in time_slots:
                 slot = slot.strip()
                 if not slot:
                     continue
                 if "-" in slot:
-                    parts = [p.strip() for p in slot.split("-", 1)]
-                    start_time, end_time = parts if len(parts) == 2 else (parts[0], "")
+                    start_time, end_time = [p.strip() for p in slot.split("-", 1)]
                 else:
                     start_time, end_time = slot, ""
 
@@ -235,18 +242,14 @@ def generate_output(events_file, staff_file, output_file):
                     continue
                 seen_events.add(key)
 
-                # main event row
-                for col_idx, val in enumerate(
-                    [event_name, activity, activity, date_str, start_time, end_time], start=1
-                ):
+                # Event row
+                for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructor rows
+                # Instructor rows
                 for instr in instrs:
-                    for col_idx, val in enumerate(
-                        [event_name, instr, activity, date_str, start_time, end_time], start=1
-                    ):
+                    for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
                     out_row += 1
 
