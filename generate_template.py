@@ -81,69 +81,49 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- ADVANCED DROPDOWN PARSING ----------
 def get_dropdown_values(ws, cell):
-    """Return dropdown options for a single cell, handling inline and cross-sheet references."""
+    """Return dropdown options for a cell, supporting inline, same-sheet, cross-sheet, and named ranges."""
     dropdowns = []
 
-    if not hasattr(ws, "data_validations"):
-        return dropdowns
-
     for dv in ws.data_validations.dataValidation:
-        if cell.coordinate not in dv.cells or dv.type != "list" or not dv.formula1:
-            continue
+        if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
+            f = dv.formula1
 
-        formula = dv.formula1.strip()
+            # Inline list: "Option1,Option2"
+            if f.startswith('"') and f.endswith('"'):
+                dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
+                continue
 
-        # Inline list
-        if formula.startswith('"') and formula.endswith('"'):
-            dropdowns.extend([x.strip() for x in formula.strip('"').split(",")])
-            continue
+            # Otherwise, it's a range or named range
+            ref = f.lstrip("=")
 
-        # Remove leading '='
-        if formula.startswith("="):
-            formula = formula[1:]
-
-        # Cross-sheet reference
-        if "!" in formula:
-            if formula.startswith("'"):
-                match = re.match(r"'(.+)'!(.+)", formula)
-                if match:
-                    sheet_name, rng = match.groups()
-                else:
-                    print(f"⚠️ Could not parse formula: {formula}")
-                    continue
-            else:
-                sheet_name, rng = formula.split("!", 1)
-            sheet_name = sheet_name.strip()
-            rng = rng.strip()
-            if sheet_name in ws.parent.sheetnames:
-                ref_ws = ws.parent[sheet_name]
-                try:
+            # Named range
+            if ref in ws.parent.defined_names:
+                dests = ws.parent.defined_names[ref].destinations  # list of (sheet_name, range)
+                for sheet_name, rng in dests:
+                    ref_ws = ws.parent[sheet_name]
                     for row in ref_ws[rng]:
                         for c in row:
                             if c.value:
                                 dropdowns.append(str(c.value).strip())
-                except Exception as e:
-                    print(f"⚠️ Failed to read range {rng} in sheet {sheet_name}: {e}")
+                continue
+
+            # Cross-sheet reference: SheetName!A1:A10
+            if "!" in ref:
+                sheet_name, rng = ref.split("!")
+                sheet_name = sheet_name.strip("'")
+                ref_ws = ws.parent[sheet_name]
             else:
-                print(f"⚠️ Sheet {sheet_name} not found")
-        else:
-            # Same-sheet range
-            ref_ws = ws
-            rng = formula
-            try:
-                for row in ref_ws[rng]:
-                    for c in row:
-                        if c.value:
-                            dropdowns.append(str(c.value).strip())
-            except Exception as e:
-                print(f"⚠️ Failed to read range {rng} in same sheet: {e}")
+                ref_ws, rng = ws, ref
 
-    print(f"Dropdown values for {cell.coordinate}: {dropdowns}")
-    return list(dict.fromkeys(dropdowns))
+            # Fetch values from the range
+            for row in ref_ws[rng]:
+                for c in row:
+                    if c.value:
+                        dropdowns.append(str(c.value).strip())
 
-# ---------- STAFF PRELOAD ----------
+    return list(dict.fromkeys(dropdowns))  # remove duplicates
+
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -179,8 +159,8 @@ def preload_staff(staff_file):
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
     instructors_map = preload_staff(staff_file)
-    print("✅ Preloaded instructors map")
-
+    print("✅ Loaded staff info")
+    
     wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
@@ -202,7 +182,7 @@ def generate_output(events_file, staff_file, output_file):
         duration_col = header_map.get("activity duration")
 
         if not (month_col and activity_col and bookable_col):
-            print(f"⚠️ Skipping sheet {sheet_name}: missing required columns")
+            print(f"⚠ Skipping sheet {sheet_name}, missing essential columns")
             continue
 
         date_start_col = month_col + 1
@@ -254,7 +234,6 @@ def generate_output(events_file, staff_file, output_file):
                 event_name = activity
 
             instrs = instructors_map.get(sheet_name, {}).get(activity, [])
-
             if event_name not in event_color_cache:
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
@@ -262,7 +241,7 @@ def generate_output(events_file, staff_file, output_file):
             # fetch timeslots from Bookable Hours dropdown
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
-            print(f"Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
+            print(f"Activity: {activity}, Time slots: {time_slots}, Instructors: {instrs}")
 
             for slot in time_slots:
                 slot = slot.strip()
