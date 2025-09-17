@@ -82,6 +82,7 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
+# ---------- DROPDOWN HANDLING ----------
 def get_dropdown_values(ws, cell):
     """Return dropdown options including cross-sheet references."""
     dropdowns = []
@@ -93,7 +94,6 @@ def get_dropdown_values(ws, cell):
             else:
                 ref = f.lstrip("=")
                 if "!" in ref:
-                    # Split sheet and range
                     sheet_name, rng = ref.split("!")
                     sheet_name = sheet_name.strip("'")
                     ref_ws = ws.parent[sheet_name]
@@ -106,9 +106,26 @@ def get_dropdown_values(ws, cell):
                     for c in row:
                         if c.value:
                             dropdowns.append(str(c.value).strip())
-    print(f"Dropdown values found for {cell.coordinate}: {dropdowns}")
     return list(dict.fromkeys(dropdowns))
 
+def get_slot_start_end(ws, cell):
+    """Return list of (start, end) tuples from dropdown cell."""
+    slots = get_dropdown_values(ws, cell)
+    start_end_list = []
+    for slot in slots:
+        slot = slot.replace("–", "-").strip()
+        if not slot:
+            continue
+        if " - " in slot:
+            start, end = [s.strip() for s in slot.split(" - ", 1)]
+        elif "-" in slot:
+            start, end = [s.strip() for s in slot.split("-", 1)]
+        else:
+            start, end = slot, ""
+        start_end_list.append((start, end))
+    return start_end_list
+
+# ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -221,29 +238,24 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
+            # --- Populate Start/End from dropdown ---
             bookable_cell = ws_src.cell(r, bookable_col)
-            time_slots = get_dropdown_values(ws_src, bookable_cell)
+            slot_times = get_slot_start_end(ws_src, bookable_cell)
+            if not slot_times:
+                slot_times = [("", "")]  # fallback empty slot
 
-            print(f"Activity: {activity}, Time slots: {time_slots}, Instructors: {instrs}")
-
-            for slot in time_slots:
-                slot = slot.strip()
-                if not slot:
-                    continue
-                if "-" in slot:
-                    start_time, end_time = [p.strip() for p in slot.split("-", 1)]
-                else:
-                    start_time, end_time = slot, ""
-
+            for start_time, end_time in slot_times:
                 key = (event_name, resort, activity, date_str, start_time, end_time)
                 if key in seen_events:
                     continue
                 seen_events.add(key)
 
+                # Main event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
+                # Instructors
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
