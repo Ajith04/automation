@@ -216,6 +216,7 @@ def generate_output(events_file, staff_file, output_file):
                 activity_resorts.setdefault(act, set()).add(res)
 
         # ---------- Pass 2: generate output ----------
+        seen_events = set()  # prevent duplicates (activity+resort+date+time)
         for r in range(2, ws_src.max_row + 1):
             activity = safe_str(ws_src.cell(r, activity_col).value)
             if not activity:
@@ -275,12 +276,17 @@ def generate_output(events_file, staff_file, output_file):
                 else:
                     start_time, end_time = slot, ""
 
-                # main event row (Resource & Config = raw activity)
+                key = (event_name, resort, activity, date_str, start_time, end_time)
+                if key in seen_events:
+                    continue  # skip duplicate
+                seen_events.add(key)
+
+                # main event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
-                # instructor rows (Resource = instructor, Config = raw activity)
+                # instructor rows
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
