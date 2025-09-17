@@ -136,7 +136,7 @@ def get_dropdown_values(ws, cell):
 
     # Remove duplicates
     dropdowns = list(dict.fromkeys(dropdowns))
-    print(f"Dropdown values for {cell.coordinate}: {dropdowns}")
+    print(f"🔹 Dropdown values for {cell.coordinate}: {dropdowns}")
     return dropdowns
 
 # ---------- STAFF PRELOAD ----------
@@ -258,7 +258,15 @@ def generate_output(events_file, staff_file, output_file):
             # fetch timeslots from Bookable Hours dropdown
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
-            print(f"Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
+
+            # ---------- DEBUG PRINTS ----------
+            print("--------------------------------------------------")
+            print(f"Sheet: {sheet_name}")
+            print(f"Row: {r}, Activity: {activity}, Resort: {resort}")
+            print(f"Bookable Cell: {bookable_cell.coordinate}")
+            print(f"Dropdown Raw Data: {time_slots}")
+            print(f"Instructors: {instrs}")
+            print("--------------------------------------------------")
 
             for slot in time_slots:
                 slot = slot.strip()
