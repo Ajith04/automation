@@ -3,21 +3,26 @@ import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
-from datetime import datetime
+from openpyxl.utils import coordinate_from_string, column_index_from_string, get_column_letter
 import random
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"    # ignore instructor if event cell red
+TARGET_RED = "FFC00000"
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
-YEAR_FOR_OUTPUT = 2025
+YEAR_FOR_OUTPUT = 2025  # you can set datetime.now().year if you want dynamic
+
+# XML namespace used in sheet XML
 NS = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+RELS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
 
 # ---------- HELPERS ----------
 def safe_str(v):
     return "" if v is None else str(v).strip()
+
 
 def get_rgb(cell):
     if cell is None:
@@ -32,35 +37,10 @@ def get_rgb(cell):
         return str(color.rgb).upper()
     return None
 
+
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
-def parse_month_to_num(month_value):
-    if month_value is None:
-        return None
-    s = str(month_value).strip()
-    if not s:
-        return None
-    MONTH_MAP = {
-        "january": 1, "jan": 1, "february": 2, "feb": 2,
-        "march": 3, "mar": 3, "april": 4, "apr": 4,
-        "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
-        "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
-        "october": 10, "oct": 10, "november": 11, "nov": 11,
-        "december": 12, "dec": 12
-    }
-    if s.isdigit() and 1 <= int(s) <= 12:
-        return int(s)
-    key = s.lower()
-    if key in MONTH_MAP:
-        return MONTH_MAP[key]
-    for name, num in MONTH_MAP.items():
-        if name in key:
-            return num
-    m = re.search(r"\b(1[0-2]|0?[1-9])\b", s)
-    if m:
-        return int(m.group(1))
-    return None
 
 def add_headers(ws):
     for col_idx, h in enumerate(HEADERS, start=1):
@@ -68,10 +48,12 @@ def add_headers(ws):
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
 
+
 def clean_instructor_name(name):
     if not name:
         return None
     return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
+
 
 def get_light_fill():
     colors = [
@@ -81,63 +63,177 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- RAW XML HELPERS ----------
-def get_data_validations(xlsx_file):
-    """Parse all data validation formulas from workbook XML."""
-    results = {}
+
+# ---------- XML Parsing (dataValidations) ----------
+def _get_sheet_file_map(xlsx_file):
+    """
+    Return dict: sheet_name -> sheet_xml_path (e.g. 'xl/worksheets/sheet2.xml')
+    """
     with zipfile.ZipFile(xlsx_file, "r") as z:
-        for sheet_file in [f for f in z.namelist() if f.startswith("xl/worksheets/sheet")]:
+        # parse workbook.xml to get sheet name -> r:id
+        wb_xml = z.read("xl/workbook.xml")
+        root = ET.fromstring(wb_xml)
+        sheets_el = root.find("main:sheets", NS)
+        sheet_to_rid = {}
+        if sheets_el is not None:
+            rid_attr = "{%s}id" % RELS_NS
+            for s in sheets_el.findall("main:sheet", NS):
+                name = s.get("name")
+                rid = s.get(rid_attr)
+                if name and rid:
+                    sheet_to_rid[name] = rid
+
+        # parse relationships to map rId -> Target path
+        rels_xml = z.read("xl/_rels/workbook.xml.rels")
+        rroot = ET.fromstring(rels_xml)
+        rid_to_target = {}
+        for rel in rroot.findall("Relationship"):
+            rid = rel.get("Id") or rel.get("Id".lower())
+            target = rel.get("Target")
+            if rid and target:
+                # canonicalize path (target is relative to xl/)
+                rid_to_target[rid] = "xl/" + target.lstrip("/")
+
+        # build sheet_name -> sheet_file mapping
+        sheet_map = {}
+        for name, rid in sheet_to_rid.items():
+            target = rid_to_target.get(rid)
+            if target:
+                sheet_map[name] = target
+        return sheet_map
+
+
+def _expand_sqref_to_cells(sqref):
+    """
+    Given a sqref string (e.g. 'E2:E10' or 'E2 E4' or 'E2'), return list of coords ['E2','E3',...]
+    """
+    coords = []
+    parts = re.split(r"\s+", sqref.strip())
+    for part in parts:
+        if ":" in part:
+            start, end = part.split(":")
+            start_col, start_row = coordinate_from_string(start)
+            end_col, end_row = coordinate_from_string(end)
+            start_row = int(start_row)
+            end_row = int(end_row)
+            start_col_idx = column_index_from_string(start_col)
+            end_col_idx = column_index_from_string(end_col)
+            for cidx in range(start_col_idx, end_col_idx + 1):
+                for r in range(start_row, end_row + 1):
+                    coords.append(f"{get_column_letter(cidx)}{r}")
+        else:
+            coords.append(part)
+    return coords
+
+
+def parse_data_validations_xlsx(xlsx_file):
+    """
+    Parse workbook xmls and return dict:
+      { sheet_name: { 'A2': formula1_text, 'B3': formula1_text, ... }, ... }
+    """
+    sheet_file_map = _get_sheet_file_map(xlsx_file)
+    results = {name: {} for name in sheet_file_map.keys()}
+
+    with zipfile.ZipFile(xlsx_file, "r") as z:
+        for sheet_name, sheet_file in sheet_file_map.items():
+            if sheet_file not in z.namelist():
+                continue
             xml_content = z.read(sheet_file)
             root = ET.fromstring(xml_content)
             dvs = root.findall(".//main:dataValidation", NS)
-            formulas = []
             for dv in dvs:
-                formula = dv.find("main:formula1", NS)
-                if formula is not None:
-                    formulas.append(formula.text)  # e.g. "A,B,C" or "=Availability!B2:B20"
-            results[sheet_file] = formulas
+                sqref = dv.get("sqref")
+                formula_el = dv.find("main:formula1", NS)
+                formula_text = formula_el.text if formula_el is not None else None
+                if not sqref or not formula_text:
+                    continue
+                cell_coords = _expand_sqref_to_cells(sqref)
+                for coord in cell_coords:
+                    # keep first formula if duplicate; but you could override if needed
+                    if coord not in results[sheet_name]:
+                        results[sheet_name][coord] = formula_text
     return results
 
-def read_range_from_sheet(xlsx_file, sheet_name, cell_range):
-    """Read values from a given sheet + range (like B2:B20)"""
-    values = []
-    with zipfile.ZipFile(xlsx_file, "r") as z:
-        sheet_file = f"xl/worksheets/{sheet_name}.xml"
-        xml_content = z.read(sheet_file)
-        root = ET.fromstring(xml_content)
-        for c in root.findall(".//main:c", NS):
-            ref = c.attrib.get("r")  # e.g., "B2"
-            if not ref:
-                continue
-            match = re.match(r"([A-Z]+)(\d+)", ref)
-            if not match:
-                continue
-            col, row = match.groups()
-            row = int(row)
-            # crude check: you can expand logic for ranges
-            if ref in cell_range or (col + str(row)) in cell_range:
-                v = c.find("main:v", NS)
-                if v is not None:
-                    values.append(v.text)
-    return values
 
-def resolve_dropdown_values(xlsx_file, formula):
-    """Resolve dropdown values from inline or cross-sheet references."""
-    values = []
+# ---------- Dropdown resolution helpers ----------
+def resolve_formula_to_values(wb, formula):
+    """
+    Given a formula string (e.g. '"08:00 - 10:00,17:00 - 19:00"' or '=Availability!B2:B20'),
+    return list of option strings.
+    wb is openpyxl workbook instance (data_only=True recommended).
+    """
     if not formula:
-        return values
-    if formula.startswith('"') and formula.endswith('"'):
-        # Inline list
-        values = [x.strip() for x in formula.strip('"').split(",")]
-    elif formula.startswith("="):
-        # Cross-sheet reference like =Availability!B2:B20
-        if "!" in formula:
-            sheet_name, rng = formula[1:].split("!")
-            sheet_name = sheet_name.strip("'")  # handle quotes
-            values = read_range_from_sheet(xlsx_file, sheet_name, rng)
-    return values
+        return []
 
-# ---------- STAFF ----------
+    formula = formula.strip()
+    # inline list
+    if formula.startswith('"') and formula.endswith('"'):
+        inner = formula.strip('"')
+        items = [x.strip() for x in inner.split(",") if x.strip()]
+        return items
+
+    # remove leading '=' if present
+    if formula.startswith("="):
+        ref = formula[1:].strip()
+    else:
+        ref = formula
+
+    # handle cross-sheet ref like 'Availability!B2:B20' (sheet name might be quoted)
+    if "!" in ref:
+        sheet_part, rng = ref.split("!", 1)
+        sheet_part = sheet_part.strip().strip("'").strip('"')
+        rng = rng.replace("$", "")
+        if sheet_part in wb.sheetnames:
+            ws = wb[sheet_part]
+            try:
+                cells = ws[rng]
+            except Exception:
+                # fallback: return empty
+                return []
+            values = []
+            # ws[rng] returns tuple(s)
+            for row in cells:
+                for c in row:
+                    if c.value is not None:
+                        values.append(str(c.value).strip())
+            return list(dict.fromkeys(values))
+
+    # if ref looks like same-sheet range (e.g. 'B2:B20')
+    if ":" in ref:
+        # we'll try to find it on all sheets - but normally this branch is for same-sheet ranges;
+        # caller should pass appropriate sheet context if needed. As a safe fallback attempt
+        values = []
+        for ws in wb.worksheets:
+            try:
+                cells = ws[ref]
+            except Exception:
+                continue
+            for row in cells:
+                for c in row:
+                    if c.value is not None:
+                        values.append(str(c.value).strip())
+        return list(dict.fromkeys(values))
+
+    # named range?
+    if ref in wb.defined_names:
+        values = []
+        try:
+            dests = wb.defined_names[ref].destinations
+            for title, area in dests:
+                if title in wb.sheetnames:
+                    ws = wb[title]
+                    for row in ws[area]:
+                        for c in row:
+                            if c.value is not None:
+                                values.append(str(c.value).strip())
+            return list(dict.fromkeys(values))
+        except Exception:
+            return []
+
+    return []
+
+
+# ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -170,26 +266,36 @@ def preload_staff(staff_file):
         result[sheet] = sheet_map
     return result
 
+
 # ---------- MAIN ----------
 def generate_output(events_file, staff_file, output_file):
+    # preload instructors
     instructors_map = preload_staff(staff_file)
+
+    # parse data validations from XML (gives mapping sheet -> { coord: formula })
+    dv_map = parse_data_validations_xlsx(events_file)
+
+    # load workbook to read actual cell values (data_only to read evaluated values)
     wb_src = load_workbook(events_file, data_only=True)
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     event_color_cache = {}
 
-    # Collect all dropdowns from raw XML
-    dropdowns_by_sheet = get_data_validations(events_file)
-
     for sheet_name in wb_src.sheetnames:
         if sheet_name.upper() not in TARGET_SHEETS:
             continue
+
         ws_src = wb_src[sheet_name]
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
-        header_map = {safe_str(ws_src.cell(1, c).value).lower(): c
-                      for c in range(1, ws_src.max_column + 1)}
+        # map headers in the source sheet
+        header_map = {}
+        for c in range(1, ws_src.max_column + 1):
+            hv = safe_str(ws_src.cell(1, c).value).lower()
+            if hv:
+                header_map[hv] = c
+
         resort_col = header_map.get("resort name")
         activity_col = header_map.get("activity")
         bookable_col = header_map.get("bookable hours")
@@ -197,13 +303,14 @@ def generate_output(events_file, staff_file, output_file):
         duration_col = header_map.get("activity duration")
 
         if not (month_col and activity_col and bookable_col):
+            # missing required columns -> skip
             continue
 
         date_start_col = month_col + 1
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
-        # detect multi-resort activities
+        # detect multi-resort activities (to attach resort to event name when needed)
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -212,6 +319,7 @@ def generate_output(events_file, staff_file, output_file):
                 activity_resorts.setdefault(act, set()).add(res)
 
         seen_events = set()
+
         for r in range(2, ws_src.max_row + 1):
             activity = safe_str(ws_src.cell(r, activity_col).value)
             if not activity:
@@ -220,10 +328,11 @@ def generate_output(events_file, staff_file, output_file):
             duration = safe_str(ws_src.cell(r, duration_col).value) if duration_col else ""
             month_val = ws_src.cell(r, month_col).value
 
+            # skip multi-day Galaxea
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            # first non-empty day
+            # find first non-empty day (original logic)
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
@@ -231,12 +340,17 @@ def generate_output(events_file, staff_file, output_file):
                     if c.value is not None and float(c.value) > 0:
                         first_day = int(ws_src.cell(1, col).value)
                         break
-                except:
+                except Exception:
                     continue
             if not first_day:
                 continue
 
-            month_num = parse_month_to_num(month_val)
+            month_num = None
+            try:
+                month_num = int(month_val)
+            except Exception:
+                # try parsing textual month
+                month_num = parse_month_to_num(month_val)
             if not month_num:
                 continue
             date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
@@ -253,35 +367,48 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # fetch Bookable Hours dropdown
-            dropdown_formulas = dropdowns_by_sheet.get(f"xl/worksheets/{sheet_name}.xml", [])
-            time_slots = []
-            for formula in dropdown_formulas:
-                time_slots.extend(resolve_dropdown_values(events_file, formula))
+            # determine bookable cell coordinate (e.g., "E5")
+            bookable_coord = f"{get_column_letter(bookable_col)}{r}"
 
+            # get formula for this specific cell (from XML-parsed dv_map)
+            sheet_dvs = dv_map.get(sheet_name, {})
+            formula = sheet_dvs.get(bookable_coord)
+
+            time_slots = []
+            if formula:
+                # resolve using openpyxl workbook
+                time_slots = resolve_formula_to_values(wb_src, formula)
+            # else: no dataValidation found for this particular cell -> no slots
+
+            # populate rows for each timeslot
             for slot in time_slots:
                 slot = slot.strip()
                 if not slot:
                     continue
                 if "-" in slot:
-                    start_time, end_time = [p.strip() for p in slot.split("-", 1)]
+                    parts = [p.strip() for p in slot.split("-", 1)]
+                    start_time = parts[0]
+                    end_time = parts[1] if len(parts) > 1 else ""
                 else:
-                    start_time, end_time = slot, ""
+                    start_time = slot
+                    end_time = ""
 
                 key = (event_name, resort, activity, date_str, start_time, end_time)
                 if key in seen_events:
                     continue
                 seen_events.add(key)
 
-                # main row
-                for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
-                    ws_out.cell(out_row, col_idx, value=val).fill = fill
+                # main event row
+                row_vals = [event_name, activity, activity, date_str, start_time, end_time]
+                for col_idx, val in enumerate(row_vals, start=1):
+                    ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                 out_row += 1
 
                 # instructor rows
                 for instr in instrs:
-                    for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
-                        ws_out.cell(out_row, col_idx, value=val).fill = fill
+                    instr_vals = [event_name, instr, activity, date_str, start_time, end_time]
+                    for col_idx, val in enumerate(instr_vals, start=1):
+                        ws_out.cell(row=out_row, column=col_idx, value=val).fill = fill
                     out_row += 1
 
     wb_out.save(output_file)
