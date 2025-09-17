@@ -2,11 +2,11 @@ import re
 import random
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import range_boundaries
+from openpyxl.utils import range_boundaries, coordinate_from_string, column_index_from_string
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"    # ignore instructor if event cell red
+TARGET_RED = "FFC00000"
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
@@ -33,7 +33,6 @@ def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
-    """Convert month names or numbers into integer 1–12."""
     if month_value is None:
         return None
     s = str(month_value).strip()
@@ -83,33 +82,45 @@ def get_light_fill():
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
 # ---------- DROPDOWN HANDLING ----------
+def cell_in_dv(cell, dv_range):
+    """Check if a cell is inside a DV range like 'B6:B100'."""
+    if ":" in dv_range:
+        start, end = dv_range.split(":")
+        start_col, start_row = column_index_from_string(coordinate_from_string(start)[0]), coordinate_from_string(start)[1]
+        end_col, end_row = column_index_from_string(coordinate_from_string(end)[0]), coordinate_from_string(end)[1]
+        return start_col <= cell.column <= end_col and start_row <= cell.row <= end_row
+    else:
+        col, row = column_index_from_string(coordinate_from_string(dv_range)[0]), coordinate_from_string(dv_range)[1]
+        return col == cell.column and row == cell.row
+
 def get_dropdown_values(ws, cell):
-    """Return dropdown options including cross-sheet references."""
+    """Return dropdown values for a cell (inline list or referenced range)."""
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
-        if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
-            f = dv.formula1
-            if f.startswith('"') and f.endswith('"'):
-                dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
-            else:
-                ref = f.lstrip("=")
-                if "!" in ref:
-                    sheet_name, rng = ref.split("!")
-                    sheet_name = sheet_name.strip("'")
-                    ref_ws = ws.parent[sheet_name]
+        if dv.type != "list":
+            continue
+        for dv_range in dv.ranges:
+            if cell_in_dv(cell, dv_range):
+                f = dv.formula1
+                if f.startswith('"') and f.endswith('"'):
+                    dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
                 else:
-                    ref_ws, rng = ws, ref
-
-                min_col, min_row, max_col, max_row = range_boundaries(rng)
-                for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
-                                            min_col=min_col, max_col=max_col):
-                    for c in row:
-                        if c.value:
-                            dropdowns.append(str(c.value).strip())
+                    ref = f.lstrip("=")
+                    if "!" in ref:
+                        sheet_name, rng = ref.split("!")
+                        sheet_name = sheet_name.strip("'")
+                        ref_ws = ws.parent[sheet_name]
+                    else:
+                        ref_ws, rng = ws, ref
+                    min_col, min_row, max_col, max_row = range_boundaries(rng)
+                    for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
+                                                min_col=min_col, max_col=max_col):
+                        for c in row:
+                            if c.value:
+                                dropdowns.append(str(c.value).strip())
     return list(dict.fromkeys(dropdowns))
 
 def get_slot_start_end(ws, cell):
-    """Return list of (start, end) tuples from dropdown cell."""
     slots = get_dropdown_values(ws, cell)
     start_end_list = []
     for slot in slots:
