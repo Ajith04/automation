@@ -2,7 +2,8 @@ import re
 import random
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import range_boundaries, coordinate_from_string, column_index_from_string
+from openpyxl.utils import range_boundaries
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
