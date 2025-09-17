@@ -100,20 +100,20 @@ def get_dropdown_values(ws, cell):
     for dv in ws.data_validations.dataValidation:
         if dv.type != "list":
             continue
-        for dv_range in dv.ranges:
-            if cell_in_dv(cell, dv_range):
+        for rng in dv.ranges.ranges:  # iterate over all ranges in MultiCellRange
+            if cell_in_dv(cell, rng):
                 f = dv.formula1
                 if f.startswith('"') and f.endswith('"'):
                     dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
                 else:
                     ref = f.lstrip("=")
                     if "!" in ref:
-                        sheet_name, rng = ref.split("!")
+                        sheet_name, rng_ref = ref.split("!")
                         sheet_name = sheet_name.strip("'")
                         ref_ws = ws.parent[sheet_name]
                     else:
-                        ref_ws, rng = ws, ref
-                    min_col, min_row, max_col, max_row = range_boundaries(rng)
+                        ref_ws, rng_ref = ws, ref
+                    min_col, min_row, max_col, max_row = range_boundaries(rng_ref)
                     for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
                                                 min_col=min_col, max_col=max_col):
                         for c in row:
@@ -254,7 +254,7 @@ def generate_output(events_file, staff_file, output_file):
             bookable_cell = ws_src.cell(r, bookable_col)
             slot_times = get_slot_start_end(ws_src, bookable_cell)
             if not slot_times:
-                slot_times = [("", "")]  # fallback empty slot
+                slot_times = [("", "")]
 
             for start_time, end_time in slot_times:
                 key = (event_name, resort, activity, date_str, start_time, end_time)
@@ -262,12 +262,10 @@ def generate_output(events_file, staff_file, output_file):
                     continue
                 seen_events.add(key)
 
-                # Main event row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
 
-                # Instructors
                 for instr in instrs:
                     for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
                         ws_out.cell(out_row, col_idx, value=val).fill = fill
