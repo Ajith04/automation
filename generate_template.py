@@ -6,7 +6,7 @@ import random
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"    # ignore instructor if event cell red
+TARGET_RED = "FFC00000"
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
@@ -30,22 +30,6 @@ MONTH_MAP = {
 # ---------- HELPERS ----------
 def safe_str(v):
     return "" if v is None else str(v).strip()
-
-def get_rgb(cell):
-    if cell is None:
-        return None
-    fill = getattr(cell, "fill", None)
-    if not fill:
-        return None
-    color = getattr(fill, "start_color", None)
-    if color is None:
-        return None
-    if hasattr(color, "rgb") and color.rgb:
-        return str(color.rgb).upper()
-    return None
-
-def is_red(cell):
-    return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
     if month_value is None:
@@ -78,50 +62,36 @@ def clean_instructor_name(name):
     return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
 
 def get_light_fill():
-    colors = [
-        "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
-        "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
-    ]
+    colors = ["FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
+              "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"]
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-def is_timeslot(value):
-    value = value.strip()
-    if not value:
-        return False
-    return bool(re.match(r"^\d{1,2}:\d{2}(-\d{1,2}:\d{2})?$", value))
-
 def get_dropdown_values(ws, cell):
+    """Return all dropdown options, even if the source is on another sheet."""
     dropdowns = []
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
-            f = dv.formula1.strip()
-            if f.startswith('"') and f.endswith('"'):
-                items = [x.strip() for x in f.strip('"').split(",")]
-                dropdowns.extend([x for x in items if is_timeslot(x)])
+            formula = dv.formula1.strip()
+            # Inline list
+            if formula.startswith('"') and formula.endswith('"'):
+                items = formula.strip('"').split(",")
+                dropdowns.extend([i.strip() for i in items])
             else:
-                ref = f.lstrip("=")
-                if ref in ws.parent.defined_names:
-                    dests = ws.parent.defined_names[ref].destinations
-                    for title, area in dests:
-                        ref_ws = ws.parent[title]
-                        for row in ref_ws[area]:
-                            for c in row:
-                                if c.value and is_timeslot(str(c.value)):
-                                    dropdowns.append(str(c.value).strip())
+                # Reference to another sheet or range
+                ref = formula.lstrip("=")
+                if "!" in ref:
+                    sheet_name, rng = ref.split("!")
+                    sheet_name = sheet_name.strip("'")  # remove quotes if any
+                    ref_ws = ws.parent[sheet_name]
                 else:
-                    if "!" in ref:
-                        sheet_name, rng = ref.split("!")
-                        sheet_name = sheet_name.strip("'")
-                        ref_ws = ws.parent[sheet_name]
-                    else:
-                        ref_ws = ws
-                        rng = ref
-                    for row in ref_ws[rng]:
-                        for c in row:
-                            if c.value and is_timeslot(str(c.value)):
-                                dropdowns.append(str(c.value).strip())
-    return list(dict.fromkeys(dropdowns))
+                    rng = ref
+                    ref_ws = ws
+                for row in ref_ws[rng]:
+                    for c in row:
+                        if c.value:
+                            dropdowns.append(str(c.value).strip())
+    return list(dict.fromkeys(dropdowns))  # remove duplicates
 
 # ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
@@ -148,7 +118,7 @@ def preload_staff(staff_file):
                 val = safe_str(val_cell.value)
                 if not val:
                     break
-                if is_red(val_cell):
+                if get_rgb(val_cell) == TARGET_RED:
                     r += 1
                     continue
                 sheet_map.setdefault(val, []).append(instr_name)
@@ -186,6 +156,7 @@ def generate_output(events_file, staff_file, output_file):
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
+        # detect multi-resort activities
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -234,6 +205,7 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
+            # fetch timeslots from Bookable Hours dropdown
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
 
@@ -251,7 +223,7 @@ def generate_output(events_file, staff_file, output_file):
                     continue
                 seen_events.add(key)
 
-                # main event row
+                # main row
                 for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
                     ws_out.cell(out_row, col_idx, value=val).fill = fill
                 out_row += 1
