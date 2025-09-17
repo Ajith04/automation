@@ -1,11 +1,12 @@
 import re
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
+from datetime import datetime
 import random
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"
+TARGET_RED = "FFC00000"    # ignore instructor if event cell red
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
@@ -29,6 +30,22 @@ MONTH_MAP = {
 # ---------- HELPERS ----------
 def safe_str(v):
     return "" if v is None else str(v).strip()
+
+def get_rgb(cell):
+    if cell is None:
+        return None
+    fill = getattr(cell, "fill", None)
+    if not fill:
+        return None
+    color = getattr(fill, "start_color", None)
+    if color is None:
+        return None
+    if hasattr(color, "rgb") and color.rgb:
+        return str(color.rgb).upper()
+    return None
+
+def is_red(cell):
+    return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
     if month_value is None:
@@ -74,39 +91,31 @@ def get_dropdown_values(ws, cell):
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate in dv.cells and dv.type == "list" and dv.formula1:
             formula = dv.formula1
-            # Inline list
             if formula.startswith('"') and formula.endswith('"'):
+                # Inline list
                 items = formula.strip('"').split(",")
                 values.extend([x.strip() for x in items])
             else:
+                # Remove '='
                 ref = formula.lstrip("=")
-                # Cross-sheet range
+                # Check for cross-sheet range: SheetName!A1:A10
                 if "!" in ref:
                     sheet_name, rng = ref.split("!")
-                    sheet_name = sheet_name.strip("'")
+                    sheet_name = sheet_name.strip("'")  # remove quotes if any
                     ref_ws = ws.parent[sheet_name]
                     for row in ref_ws[rng]:
                         for c in row:
                             if c.value:
                                 values.append(str(c.value).strip())
-                # Named range
-                elif ref in ws.parent.defined_names:
-                    dests = ws.parent.defined_names[ref].destinations
-                    for title, area in dests:
-                        ref_ws = ws.parent[title]
-                        for row in ref_ws[area]:
-                            for c in row:
-                                if c.value:
-                                    values.append(str(c.value).strip())
-                # Same-sheet range
                 else:
-                    ref_ws = ws
-                    for row in ref_ws[ref]:
+                    # Same-sheet range
+                    for row in ws[ref]:
                         for c in row:
                             if c.value:
                                 values.append(str(c.value).strip())
     return list(dict.fromkeys(values))  # remove duplicates
 
+# ---------- STAFF LOADER ----------
 def preload_staff(staff_file):
     wb = load_workbook(staff_file, data_only=True)
     result = {}
@@ -131,6 +140,9 @@ def preload_staff(staff_file):
                 val = safe_str(val_cell.value)
                 if not val:
                     break
+                if is_red(val_cell):
+                    r += 1
+                    continue
                 sheet_map.setdefault(val, []).append(instr_name)
                 r += 1
         result[sheet] = sheet_map
@@ -166,6 +178,7 @@ def generate_output(events_file, staff_file, output_file):
         max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
         out_row = 2
 
+        # detect multi-resort activities
         activity_resorts = {}
         for r in range(2, ws_src.max_row + 1):
             act = safe_str(ws_src.cell(r, activity_col).value)
@@ -185,7 +198,7 @@ def generate_output(events_file, staff_file, output_file):
             if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
                 continue
 
-            # first non-empty day
+            # find first non-empty day
             first_day = None
             for col in range(date_start_col, max_check_col + 1):
                 c = ws_src.cell(r, col)
