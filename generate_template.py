@@ -82,11 +82,14 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- DROPDOWN PARSING ----------
+# ---------- DROPDOWN PARSING WITH VIRTUAL FLATTENING ----------
 def get_dropdown_values(ws, cell):
     """
     Return all dropdown options for a given cell.
-    Works even for cross-sheet ranges (Availability!A2:A10).
+    Handles:
+      - Inline lists like "Option1,Option2"
+      - Same-sheet ranges like =B2:B10
+      - Cross-sheet ranges like =Availability!B2:B20
     """
     dropdowns = []
 
@@ -94,15 +97,12 @@ def get_dropdown_values(ws, cell):
         return dropdowns
 
     for dv in ws.data_validations.dataValidation:
-        # Check if this validation applies to our cell
-        if not dv.sqref or cell.coordinate not in dv.sqref:
-            continue
-        if dv.type != "list" or not dv.formula1:
+        if cell.coordinate not in dv.cells or dv.type != "list" or not dv.formula1:
             continue
 
         f = dv.formula1.strip()
 
-        # Inline list: "A,B,C"
+        # Inline list
         if f.startswith('"') and f.endswith('"'):
             dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
             continue
@@ -118,23 +118,31 @@ def get_dropdown_values(ws, cell):
             if sheet_name in ws.parent.sheetnames:
                 ref_ws = ws.parent[sheet_name]
             else:
-                print(f"⚠️ Sheet {sheet_name} not found for reference {f}")
+                print(f"⚠️ Sheet {sheet_name} not found")
                 continue
         else:
             ref_ws, rng = ws, f
 
+        # Virtual flattening: copy referenced range to same sheet temporarily
         try:
             min_col, min_row, max_col, max_row = range_boundaries(rng)
-            for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
-                                        min_col=min_col, max_col=max_col):
-                for c in row:
-                    if c.value is not None:
-                        dropdowns.append(str(c.value).strip())
+            temp_col = ws.max_column + 1
+            for r_idx, row in enumerate(ref_ws.iter_rows(min_row=min_row, max_row=max_row,
+                                                         min_col=min_col, max_col=max_col)):
+                for c_idx, ref_cell in enumerate(row):
+                    ws.cell(row=r_idx+1, column=temp_col+c_idx, value=ref_cell.value)
+
+            # Read the values from temp range
+            for r in range(1, max_row - min_row + 2):
+                for c in range(temp_col, temp_col + (max_col - min_col + 1)):
+                    val = ws.cell(r, c).value
+                    if val is not None:
+                        dropdowns.append(str(val).strip())
         except Exception as e:
-            print(f"⚠️ Failed to read range {f}: {e}")
+            print(f"⚠️ Failed to read range {rng}: {e}")
 
     dropdowns = list(dict.fromkeys(dropdowns))
-    print(f"✅ Dropdown values for {cell.coordinate} ({ws.title}): {dropdowns}")
+    print(f"✅ Dropdown values for {cell.coordinate}: {dropdowns}")
     return dropdowns
 
 # ---------- STAFF PRELOAD ----------
@@ -256,7 +264,7 @@ def generate_output(events_file, staff_file, output_file):
             # fetch timeslots from Bookable Hours dropdown
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
-            print(f"➡️ ROW {r}, Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
+            print(f"➡️ Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
 
             for slot in time_slots:
                 slot = slot.strip()
