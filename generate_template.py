@@ -6,292 +6,236 @@ from openpyxl.utils import range_boundaries
 
 # ---------- CONFIG ----------
 TARGET_SHEETS = ["AKUN", "WAMA", "GALAXEA"]
-TARGET_RED = "FFC00000"    # ignore instructor if event cell red
+TARGET_RED = "FFC00000"
 HEADERS = ["Event", "Resource", "Configuration", "Date", "Start Time", "End Time"]
 HEADER_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 HEADER_FONT = Font(bold=True)
 YEAR_FOR_OUTPUT = 2025
+
+# ---------- LOGGING ----------
+log_lines = []
+
+def log(msg):
+    log_lines.append(msg)
+    print(msg)  # optional for local testing
 
 # ---------- HELPERS ----------
 def safe_str(v):
     return "" if v is None else str(v).strip()
 
 def get_rgb(cell):
-    if cell is None:
-        return None
+    if cell is None: return None
     fill = getattr(cell, "fill", None)
-    if not fill:
-        return None
+    if not fill: return None
     color = getattr(fill, "start_color", None)
-    if color is None:
-        return None
-    if hasattr(color, "rgb") and color.rgb:
-        return str(color.rgb).upper()
+    if color is None: return None
+    if hasattr(color, "rgb") and color.rgb: return str(color.rgb).upper()
     return None
 
 def is_red(cell):
     return get_rgb(cell) == TARGET_RED
 
 def parse_month_to_num(month_value):
-    """Convert month names or numbers into integer 1–12."""
-    if month_value is None:
-        return None
+    if month_value is None: return None
     s = str(month_value).strip()
-    if not s:
-        return None
-    if s.isdigit() and 1 <= int(s) <= 12:
-        return int(s)
+    if not s: return None
+    if s.isdigit() and 1 <= int(s) <= 12: return int(s)
     MONTH_MAP = {
-        "january": 1, "jan": 1,
-        "february": 2, "feb": 2,
-        "march": 3, "mar": 3,
-        "april": 4, "apr": 4,
-        "may": 5,
-        "june": 6, "jun": 6,
-        "july": 7, "jul": 7,
-        "august": 8, "aug": 8,
-        "september": 9, "sep": 9, "sept": 9,
-        "october": 10, "oct": 10,
-        "november": 11, "nov": 11,
-        "december": 12, "dec": 12
+        "january":1,"jan":1,"february":2,"feb":2,"march":3,"mar":3,
+        "april":4,"apr":4,"may":5,"june":6,"jun":6,"july":7,"jul":7,
+        "august":8,"aug":8,"september":9,"sep":9,"sept":9,
+        "october":10,"oct":10,"november":11,"nov":11,"december":12,"dec":12
     }
     key = s.lower()
-    if key in MONTH_MAP:
-        return MONTH_MAP[key]
-    for name, num in MONTH_MAP.items():
-        if name in key:
-            return num
+    if key in MONTH_MAP: return MONTH_MAP[key]
+    for name,num in MONTH_MAP.items():
+        if name in key: return num
     return None
 
 def add_headers(ws):
-    for col_idx, h in enumerate(HEADERS, start=1):
-        c = ws.cell(row=1, column=col_idx, value=h)
+    for col_idx,h in enumerate(HEADERS,start=1):
+        c = ws.cell(row=1,column=col_idx,value=h)
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
 
 def clean_instructor_name(name):
-    if not name:
-        return None
-    return re.sub(r"\s*\(.*?\)\s*", "", str(name)).strip()
+    if not name: return None
+    return re.sub(r"\s*\(.*?\)\s*","",str(name)).strip()
 
 def get_light_fill():
-    colors = [
-        "FFFFE5CC", "FFE5FFCC", "FFCCFFE5", "FFCCE5FF",
-        "FFFFCCFF", "FFE5CCFF", "FFFFCCCC", "FFCCFFFF"
-    ]
+    colors = ["FFFFE5CC","FFE5FFCC","FFCCFFE5","FFCCE5FF",
+              "FFFFCCFF","FFE5CCFF","FFFFCCCC","FFCCFFFF"]
     hexcolor = random.choice(colors)
-    return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
+    return PatternFill(start_color=hexcolor,end_color=hexcolor,fill_type="solid")
 
-# ---------- PRELOAD DROPDOWN DATA ----------
+# ---------- PRELOAD DROPDOWN ----------
 def preload_dropdowns(wb):
-    """Preload all dropdown ranges across sheets into memory."""
-    dropdown_map = {}  # key: (sheet_name, range), value: list of options
+    dropdown_map = {}
     for ws in wb.worksheets:
-        if not hasattr(ws, "data_validations"):
-            continue
+        if not hasattr(ws,"data_validations"): continue
         for dv in ws.data_validations.dataValidation:
-            if dv.type != "list" or not dv.formula1:
-                continue
+            if dv.type != "list" or not dv.formula1: continue
             formula = dv.formula1.strip()
-            if formula.startswith('"') and formula.endswith('"'):
-                # inline list, no need to preload
-                continue
-            if formula.startswith("="):
-                formula = formula[1:]
+            if formula.startswith('"') and formula.endswith('"'): continue
+            if formula.startswith("="): formula = formula[1:]
             if "!" in formula:
-                sheet_name, rng = formula.split("!")
+                sheet_name,rng = formula.split("!")
                 sheet_name = sheet_name.strip("'")
-                if sheet_name not in wb.sheetnames:
-                    continue
+                if sheet_name not in wb.sheetnames: continue
                 ref_ws = wb[sheet_name]
             else:
                 ref_ws = ws
                 rng = formula
             try:
-                min_col, min_row, max_col, max_row = range_boundaries(rng)
+                min_col,min_row,max_col,max_row = range_boundaries(rng)
                 values = []
-                for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
-                                            min_col=min_col, max_col=max_col):
+                for row in ref_ws.iter_rows(min_row=min_row,max_row=max_row,
+                                            min_col=min_col,max_col=max_col):
                     for c in row:
-                        if c.value is not None:
-                            values.append(str(c.value).strip())
-                dropdown_map[(ref_ws.title, rng)] = list(dict.fromkeys(values))
+                        if c.value is not None: values.append(str(c.value).strip())
+                dropdown_map[(ref_ws.title,rng)] = list(dict.fromkeys(values))
             except:
                 continue
     return dropdown_map
 
-# ---------- DROPDOWN PARSING USING PRELOADED ----------
-def get_dropdown_values(ws, cell, dropdown_map):
+def get_dropdown_values(ws,cell,dropdown_map):
     dropdowns = []
-    if not hasattr(ws, "data_validations"):
-        return dropdowns
+    if not hasattr(ws,"data_validations"): return dropdowns
     for dv in ws.data_validations.dataValidation:
-        if cell.coordinate not in dv.cells or dv.type != "list" or not dv.formula1:
-            continue
+        if cell.coordinate not in dv.cells or dv.type!="list" or not dv.formula1: continue
         f = dv.formula1.strip()
-        # Inline list
         if f.startswith('"') and f.endswith('"'):
             dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
             continue
-        # Range
-        if f.startswith("="):
-            f = f[1:]
+        if f.startswith("="): f=f[1:]
         if "!" in f:
-            sheet_name, rng = f.split("!")
-            sheet_name = sheet_name.strip("'")
+            sheet_name,rng = f.split("!")
+            sheet_name=sheet_name.strip("'")
         else:
-            sheet_name, rng = ws.title, f
-        dropdowns.extend(dropdown_map.get((sheet_name, rng), []))
+            sheet_name,rng=ws.title,f
+        dropdowns.extend(dropdown_map.get((sheet_name,rng),[]))
     return list(dict.fromkeys(dropdowns))
 
 # ---------- STAFF PRELOAD ----------
 def preload_staff(staff_file):
-    wb = load_workbook(staff_file, data_only=True)
+    wb = load_workbook(staff_file,data_only=True)
     result = {}
     for sheet in TARGET_SHEETS:
-        if sheet not in wb.sheetnames:
-            continue
+        if sheet not in wb.sheetnames: continue
         ws = wb[sheet]
         headers = [safe_str(c.value).lower() for c in ws[1]]
-        try:
-            pri_idx = headers.index("priority") + 1
-        except ValueError:
-            pri_idx = 1
-        instr_start_col = pri_idx + 1
+        try: pri_idx = headers.index("priority")+1
+        except: pri_idx = 1
+        instr_start_col = pri_idx+1
         sheet_map = {}
-        for col in range(instr_start_col, ws.max_column + 1):
-            instr_name = clean_instructor_name(safe_str(ws.cell(1, col).value))
-            if not instr_name:
-                continue
-            r = 2
-            while r <= ws.max_row:
-                val_cell = ws.cell(r, col)
+        for col in range(instr_start_col,ws.max_column+1):
+            instr_name = clean_instructor_name(safe_str(ws.cell(1,col).value))
+            if not instr_name: continue
+            r=2
+            while r<=ws.max_row:
+                val_cell = ws.cell(r,col)
                 val = safe_str(val_cell.value)
-                if not val:
-                    break
-                if is_red(val_cell):
-                    r += 1
-                    continue
-                sheet_map.setdefault(val, []).append(instr_name)
-                r += 1
-        result[sheet] = sheet_map
+                if not val: break
+                if is_red(val_cell): r+=1; continue
+                sheet_map.setdefault(val,[]).append(instr_name)
+                r+=1
+        result[sheet]=sheet_map
     return result
 
 # ---------- MAIN ----------
-def generate_output(events_file, staff_file, output_file):
+def generate_output(events_file,staff_file,output_file):
+    log_lines.clear()
     instructors_map = preload_staff(staff_file)
-    print("✅ Preloaded instructors map")
-
-    wb_src = load_workbook(events_file, data_only=True)
+    log("✅ Preloaded instructors map")
+    wb_src = load_workbook(events_file,data_only=True)
     dropdown_map = preload_dropdowns(wb_src)
-    print("✅ Preloaded dropdown data")
+    log("✅ Preloaded dropdown data")
 
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
-    event_color_cache = {}
+    event_color_cache={}
 
     for sheet_name in wb_src.sheetnames:
-        if sheet_name.upper() not in TARGET_SHEETS:
-            continue
+        if sheet_name.upper() not in TARGET_SHEETS: continue
         ws_src = wb_src[sheet_name]
         ws_out = wb_out.create_sheet(sheet_name)
         add_headers(ws_out)
 
-        header_map = {safe_str(ws_src.cell(1, c).value).lower(): c
-                      for c in range(1, ws_src.max_column + 1)}
-        resort_col = header_map.get("resort name")
-        activity_col = header_map.get("activity")
-        bookable_col = header_map.get("bookable hours")
-        month_col = header_map.get("month")
-        duration_col = header_map.get("activity duration")
-
+        header_map={safe_str(ws_src.cell(1,c).value).lower():c for c in range(1,ws_src.max_column+1)}
+        resort_col=header_map.get("resort name")
+        activity_col=header_map.get("activity")
+        bookable_col=header_map.get("bookable hours")
+        month_col=header_map.get("month")
+        duration_col=header_map.get("activity duration")
         if not (month_col and activity_col and bookable_col):
-            print(f"⚠️ Skipping sheet {sheet_name}: missing required columns")
+            log(f"⚠️ Skipping sheet {sheet_name}: missing required columns")
             continue
 
-        date_start_col = month_col + 1
-        max_check_col = min(ws_src.max_column, date_start_col + 31 - 1)
-        out_row = 2
+        date_start_col=month_col+1
+        max_check_col=min(ws_src.max_column,date_start_col+31-1)
+        out_row=2
 
         # collect resorts per activity
-        activity_resorts = {}
-        for r in range(2, ws_src.max_row + 1):
-            act = safe_str(ws_src.cell(r, activity_col).value)
-            res = safe_str(ws_src.cell(r, resort_col).value) if resort_col else ""
-            if act:
-                activity_resorts.setdefault(act, set()).add(res)
+        activity_resorts={}
+        for r in range(2,ws_src.max_row+1):
+            act=safe_str(ws_src.cell(r,activity_col).value)
+            res=safe_str(ws_src.cell(r,resort_col).value) if resort_col else ""
+            if act: activity_resorts.setdefault(act,set()).add(res)
 
-        seen_events = set()
-        for r in range(2, ws_src.max_row + 1):
-            activity = safe_str(ws_src.cell(r, activity_col).value)
-            if not activity:
-                continue
-            resort = safe_str(ws_src.cell(r, resort_col).value) if resort_col else ""
-            duration = safe_str(ws_src.cell(r, duration_col).value) if duration_col else ""
-            month_val = ws_src.cell(r, month_col).value
+        seen_events=set()
+        for r in range(2,ws_src.max_row+1):
+            activity=safe_str(ws_src.cell(r,activity_col).value)
+            if not activity: continue
+            resort=safe_str(ws_src.cell(r,resort_col).value) if resort_col else ""
+            duration=safe_str(ws_src.cell(r,duration_col).value) if duration_col else ""
+            month_val=ws_src.cell(r,month_col).value
+            if sheet_name.upper()=="GALAXEA" and "day" in duration.lower(): continue
 
-            if sheet_name.upper() == "GALAXEA" and "day" in duration.lower():
-                continue
-
-            # find first valid day
-            first_day = None
-            for col in range(date_start_col, max_check_col + 1):
-                c = ws_src.cell(r, col)
+            # first valid day
+            first_day=None
+            for col in range(date_start_col,max_check_col+1):
+                c=ws_src.cell(r,col)
                 try:
-                    if c.value is not None and float(c.value) > 0:
-                        first_day = int(ws_src.cell(1, col).value)
+                    if c.value is not None and float(c.value)>0:
+                        first_day=int(ws_src.cell(1,col).value)
                         break
-                except:
-                    continue
-            if not first_day:
-                continue
+                except: continue
+            if not first_day: continue
+            month_num=parse_month_to_num(month_val)
+            if not month_num: continue
+            date_str=f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
 
-            month_num = parse_month_to_num(month_val)
-            if not month_num:
-                continue
-            date_str = f"{first_day:02d}/{month_num:02d}/{YEAR_FOR_OUTPUT}"
-
-            resorts_for_activity = activity_resorts.get(activity, set())
-            if len(resorts_for_activity) > 1 and resort:
-                event_name = f"{activity} - {resort}"
-            else:
-                event_name = activity
-
-            instrs = instructors_map.get(sheet_name, {}).get(activity, [])
+            resorts_for_activity=activity_resorts.get(activity,set())
+            event_name=f"{activity} - {resort}" if len(resorts_for_activity)>1 and resort else activity
+            instrs=instructors_map.get(sheet_name,{}).get(activity,[])
 
             if event_name not in event_color_cache:
-                event_color_cache[event_name] = get_light_fill()
-            fill = event_color_cache[event_name]
+                event_color_cache[event_name]=get_light_fill()
+            fill=event_color_cache[event_name]
 
-            # fetch timeslots from Bookable Hours dropdown using preloaded data
-            bookable_cell = ws_src.cell(r, bookable_col)
-            time_slots = get_dropdown_values(ws_src, bookable_cell, dropdown_map)
-            print(f"➡️ Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
+            bookable_cell=ws_src.cell(r,bookable_col)
+            time_slots=get_dropdown_values(ws_src,bookable_cell,dropdown_map)
+            log(f"➡️ Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
 
             for slot in time_slots:
-                slot = slot.strip()
-                if not slot:
-                    continue
-                if "-" in slot:
-                    start_time, end_time = [p.strip() for p in slot.split("-", 1)]
-                else:
-                    start_time, end_time = slot, ""
-
-                key = (event_name, resort, activity, date_str, start_time, end_time)
-                if key in seen_events:
-                    continue
+                slot=slot.strip()
+                if not slot: continue
+                if "-" in slot: start_time,end_time=[p.strip() for p in slot.split("-",1)]
+                else: start_time,end_time=slot,""
+                key=(event_name,resort,activity,date_str,start_time,end_time)
+                if key in seen_events: continue
                 seen_events.add(key)
 
                 # event row
-                for col_idx, val in enumerate([event_name, activity, activity, date_str, start_time, end_time], start=1):
-                    ws_out.cell(out_row, col_idx, value=val).fill = fill
-                out_row += 1
-
+                for col_idx,val in enumerate([event_name,activity,activity,date_str,start_time,end_time],start=1):
+                    ws_out.cell(out_row,col_idx,value=val).fill=fill
+                out_row+=1
                 # instructor rows
                 for instr in instrs:
-                    for col_idx, val in enumerate([event_name, instr, activity, date_str, start_time, end_time], start=1):
-                        ws_out.cell(out_row, col_idx, value=val).fill = fill
-                    out_row += 1
+                    for col_idx,val in enumerate([event_name,instr,activity,date_str,start_time,end_time],start=1):
+                        ws_out.cell(out_row,col_idx,value=val).fill=fill
+                    out_row+=1
 
     wb_out.save(output_file)
-    print(f"✅ Output saved to {output_file}")
+    log(f"✅ Output saved to {output_file}")
+    return log_lines
