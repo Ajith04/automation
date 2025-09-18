@@ -82,68 +82,67 @@ def get_light_fill():
     hexcolor = random.choice(colors)
     return PatternFill(start_color=hexcolor, end_color=hexcolor, fill_type="solid")
 
-# ---------- DROPDOWN PARSING WITH VIRTUAL FLATTENING ----------
-def get_dropdown_values(ws, cell):
-    """
-    Return all dropdown options for a given cell.
-    Handles:
-      - Inline lists like "Option1,Option2"
-      - Same-sheet ranges like =B2:B10
-      - Cross-sheet ranges like =Availability!B2:B20
-    """
-    dropdowns = []
+# ---------- PRELOAD DROPDOWN DATA ----------
+def preload_dropdowns(wb):
+    """Preload all dropdown ranges across sheets into memory."""
+    dropdown_map = {}  # key: (sheet_name, range), value: list of options
+    for ws in wb.worksheets:
+        if not hasattr(ws, "data_validations"):
+            continue
+        for dv in ws.data_validations.dataValidation:
+            if dv.type != "list" or not dv.formula1:
+                continue
+            formula = dv.formula1.strip()
+            if formula.startswith('"') and formula.endswith('"'):
+                # inline list, no need to preload
+                continue
+            if formula.startswith("="):
+                formula = formula[1:]
+            if "!" in formula:
+                sheet_name, rng = formula.split("!")
+                sheet_name = sheet_name.strip("'")
+                if sheet_name not in wb.sheetnames:
+                    continue
+                ref_ws = wb[sheet_name]
+            else:
+                ref_ws = ws
+                rng = formula
+            try:
+                min_col, min_row, max_col, max_row = range_boundaries(rng)
+                values = []
+                for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
+                                            min_col=min_col, max_col=max_col):
+                    for c in row:
+                        if c.value is not None:
+                            values.append(str(c.value).strip())
+                dropdown_map[(ref_ws.title, rng)] = list(dict.fromkeys(values))
+            except:
+                continue
+    return dropdown_map
 
+# ---------- DROPDOWN PARSING USING PRELOADED ----------
+def get_dropdown_values(ws, cell, dropdown_map):
+    dropdowns = []
     if not hasattr(ws, "data_validations"):
         return dropdowns
-
     for dv in ws.data_validations.dataValidation:
         if cell.coordinate not in dv.cells or dv.type != "list" or not dv.formula1:
             continue
-
         f = dv.formula1.strip()
-
         # Inline list
         if f.startswith('"') and f.endswith('"'):
             dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
             continue
-
-        # Remove leading '='
+        # Range
         if f.startswith("="):
             f = f[1:]
-
-        # Cross-sheet reference
         if "!" in f:
             sheet_name, rng = f.split("!")
             sheet_name = sheet_name.strip("'")
-            if sheet_name in ws.parent.sheetnames:
-                ref_ws = ws.parent[sheet_name]
-            else:
-                print(f"⚠️ Sheet {sheet_name} not found")
-                continue
         else:
-            ref_ws, rng = ws, f
-
-        # Virtual flattening: copy referenced range to same sheet temporarily
-        try:
-            min_col, min_row, max_col, max_row = range_boundaries(rng)
-            temp_col = ws.max_column + 1
-            for r_idx, row in enumerate(ref_ws.iter_rows(min_row=min_row, max_row=max_row,
-                                                         min_col=min_col, max_col=max_col)):
-                for c_idx, ref_cell in enumerate(row):
-                    ws.cell(row=r_idx+1, column=temp_col+c_idx, value=ref_cell.value)
-
-            # Read the values from temp range
-            for r in range(1, max_row - min_row + 2):
-                for c in range(temp_col, temp_col + (max_col - min_col + 1)):
-                    val = ws.cell(r, c).value
-                    if val is not None:
-                        dropdowns.append(str(val).strip())
-        except Exception as e:
-            print(f"⚠️ Failed to read range {rng}: {e}")
-
-    dropdowns = list(dict.fromkeys(dropdowns))
-    print(f"✅ Dropdown values for {cell.coordinate}: {dropdowns}")
-    return dropdowns
+            sheet_name, rng = ws.title, f
+        dropdowns.extend(dropdown_map.get((sheet_name, rng), []))
+    return list(dict.fromkeys(dropdowns))
 
 # ---------- STAFF PRELOAD ----------
 def preload_staff(staff_file):
@@ -184,6 +183,9 @@ def generate_output(events_file, staff_file, output_file):
     print("✅ Preloaded instructors map")
 
     wb_src = load_workbook(events_file, data_only=True)
+    dropdown_map = preload_dropdowns(wb_src)
+    print("✅ Preloaded dropdown data")
+
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
     event_color_cache = {}
@@ -261,9 +263,9 @@ def generate_output(events_file, staff_file, output_file):
                 event_color_cache[event_name] = get_light_fill()
             fill = event_color_cache[event_name]
 
-            # fetch timeslots from Bookable Hours dropdown
+            # fetch timeslots from Bookable Hours dropdown using preloaded data
             bookable_cell = ws_src.cell(r, bookable_col)
-            time_slots = get_dropdown_values(ws_src, bookable_cell)
+            time_slots = get_dropdown_values(ws_src, bookable_cell, dropdown_map)
             print(f"➡️ Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
 
             for slot in time_slots:
