@@ -86,10 +86,7 @@ def get_light_fill():
 def get_dropdown_values(ws, cell):
     """
     Return all dropdown options for a given cell.
-    Handles:
-      - Inline lists like "Option1,Option2"
-      - Same-sheet ranges like =B2:B10
-      - Cross-sheet ranges like =Availability!B2:B20
+    Works even for cross-sheet ranges (Availability!A2:A10).
     """
     dropdowns = []
 
@@ -97,12 +94,15 @@ def get_dropdown_values(ws, cell):
         return dropdowns
 
     for dv in ws.data_validations.dataValidation:
-        if cell.coordinate not in dv.cells or dv.type != "list" or not dv.formula1:
+        # Check if this validation applies to our cell
+        if not dv.sqref or cell.coordinate not in dv.sqref:
+            continue
+        if dv.type != "list" or not dv.formula1:
             continue
 
         f = dv.formula1.strip()
 
-        # Inline list
+        # Inline list: "A,B,C"
         if f.startswith('"') and f.endswith('"'):
             dropdowns.extend([x.strip() for x in f.strip('"').split(",")])
             continue
@@ -123,7 +123,6 @@ def get_dropdown_values(ws, cell):
         else:
             ref_ws, rng = ws, f
 
-        # Resolve range
         try:
             min_col, min_row, max_col, max_row = range_boundaries(rng)
             for row in ref_ws.iter_rows(min_row=min_row, max_row=max_row,
@@ -132,9 +131,8 @@ def get_dropdown_values(ws, cell):
                     if c.value is not None:
                         dropdowns.append(str(c.value).strip())
         except Exception as e:
-            print(f"⚠️ Failed to read range {rng}: {e}")
+            print(f"⚠️ Failed to read range {f}: {e}")
 
-    # Remove duplicates
     dropdowns = list(dict.fromkeys(dropdowns))
     print(f"✅ Dropdown values for {cell.coordinate} ({ws.title}): {dropdowns}")
     return dropdowns
@@ -258,7 +256,7 @@ def generate_output(events_file, staff_file, output_file):
             # fetch timeslots from Bookable Hours dropdown
             bookable_cell = ws_src.cell(r, bookable_col)
             time_slots = get_dropdown_values(ws_src, bookable_cell)
-            print(f"➡️ Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
+            print(f"➡️ ROW {r}, Activity: {activity}, Cell: {bookable_cell.coordinate}, Time slots: {time_slots}, Instructors: {instrs}")
 
             for slot in time_slots:
                 slot = slot.strip()
